@@ -9,9 +9,15 @@ namespace DB
 class DataPartStorageOnDiskFull final : public DataPartStorageOnDiskBase
 {
 public:
-    DataPartStorageOnDiskFull(VolumePtr volume_, std::string root_path_, std::string part_dir_);
+    DataPartStorageOnDiskFull(
+        VolumePtr volume_,
+        std::string root_path_,
+        std::string part_dir_,
+        ProjectionStorageFormat projection_storage_format_ = ProjectionStorageFormat::LEGACY_NESTED);
+
     MergeTreeDataPartStorageType getType() const override { return MergeTreeDataPartStorageType::Full; }
 
+    bool hasProjection(const std::string & name) override;
     MutableDataPartStoragePtr getProjection(const std::string & name, bool use_parent_transaction = true) override; // NOLINT
     DataPartStoragePtr getProjection(const std::string & name) const override;
 
@@ -55,8 +61,19 @@ public:
 #endif
 
 private:
-    DataPartStorageOnDiskFull(VolumePtr volume_, std::string root_path_, std::string part_dir_, DiskTransactionPtr transaction_);
-    MutableDataPartStoragePtr create(VolumePtr volume_, std::string root_path_, std::string part_dir_, bool initialize_) const override;
+    DataPartStorageOnDiskFull(
+        VolumePtr volume_,
+        std::string root_path_,
+        std::string part_dir_,
+        DiskTransactionPtr transaction_,
+        ProjectionStorageFormat projection_storage_format_ = ProjectionStorageFormat::LEGACY_NESTED);
+
+    MutableDataPartStoragePtr create(
+        VolumePtr volume_,
+        std::string root_path_,
+        std::string part_dir_,
+        bool initialize_,
+        ProjectionStorageFormat projection_storage_format_) const override;
 
     NameSet getActualFileNamesOnDisk(const NameSet & file_names) const override { return file_names; }
 
@@ -71,6 +88,8 @@ private:
         const std::string & name,
         const ReadSettings & settings,
         std::optional<size_t> read_hint) const override;
+
+    IDataPartStorage::ProjectionStorageFormat detectProjectionAndItsFormat(const std::string & name) const;
 };
 
 }
