@@ -153,6 +153,9 @@ public:
     Type getType() const { return part_type; }
     MergeTreeDataPartFormat getFormat() const { return {part_type, getDataPartStorage().getType()}; }
 
+    /// On-disk layout to use when creating this part's projection directories (from the table setting).
+    IDataPartStorage::ProjectionStorageFormat getProjectionStorageFormat() const;
+
     String getTypeName() const { return getType().toString(); }
 
     /// We could have separate method like setMetadata, but it's much more convenient to set it up with columns

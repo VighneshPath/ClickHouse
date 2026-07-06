@@ -59,8 +59,7 @@ private:
         const VolumePtr & volume_,
         const String & root_path_,
         const String & part_dir_,
-        const ReadSettings & read_settings,
-        IDataPartStorage::ProjectionStorageFormat projection_format = IDataPartStorage::ProjectionStorageFormat::LEGACY_NESTED);
+        const ReadSettings & read_settings);
 
     const MergeTreeData & data;
     const String name;

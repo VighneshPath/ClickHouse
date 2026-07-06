@@ -862,7 +862,10 @@ MergeTreeData::MutableDataPartPtr Fetcher::downloadPartToDisk(
 
             MergeTreeData::DataPart::Checksums projection_checksum;
 
-            auto projection_part_storage = part_storage_for_loading->getProjection(projection_name + ".proj");
+            /// Create fetched projection dirs in the table's configured layout (the dirs don't exist yet,
+            /// so the hint decides; for an existing dir getProjection detects it instead).
+            auto projection_part_storage = part_storage_for_loading->getProjection(
+                projection_name + ".proj", /*use_parent_transaction*/ true, data.getProjectionStorageFormat());
             projection_part_storage->createDirectories();
 
             downloadBaseOrProjectionPartToDisk(

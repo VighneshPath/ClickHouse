@@ -1176,6 +1176,10 @@ public:
     /// When `settings_changes` is provided, apply the overrides on top of the table settings.
     MergeTreeSettingsPtr getSettings(const SettingsChanges * settings_changes = nullptr) const;
 
+    /// On-disk layout for projection sub-parts of this table's parts (from the `projection_storage_format`
+    /// setting). The single source of truth: read it here wherever a projection directory is created.
+    IDataPartStorage::ProjectionStorageFormat getProjectionStorageFormat() const;
+
     StorageMetadataHandle getInMemoryMetadataPtr(ContextPtr query_context, bool bypass_metadata_cache) const override;
 
     /// Whether the per-part metadata version is stored in the engine's metadata storage instead of

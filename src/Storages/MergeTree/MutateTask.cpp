@@ -2253,7 +2253,7 @@ private:
             if (!entries_to_hardlink.contains(proj->name()))
                 continue;
 
-            ctx->new_data_part->getDataPartStorage().createProjection(proj->name());
+            ctx->new_data_part->getDataPartStorage().createProjection(proj->name(), ctx->new_data_part->getProjectionStorageFormat());
 
             auto projection_data_part_storage_src = ctx->source_part->getDataPartStorage().getProjection(proj->name());
             auto projection_data_part_storage_dst = ctx->new_data_part->getDataPartStorage().getProjection(proj->name());
@@ -2561,7 +2561,7 @@ private:
             if (rename_it != ctx->files_to_rename.end())
                 continue;
 
-            ctx->new_data_part->getDataPartStorage().createProjection(projection_dir);
+            ctx->new_data_part->getDataPartStorage().createProjection(projection_dir, ctx->new_data_part->getProjectionStorageFormat());
 
             auto projection_data_part_storage_src = ctx->source_part->getDataPartStorage().getProjection(projection_dir);
             auto projection_data_part_storage_dst = ctx->new_data_part->getDataPartStorage().getProjection(projection_dir);

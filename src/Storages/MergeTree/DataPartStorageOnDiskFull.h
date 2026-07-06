@@ -12,14 +12,19 @@ public:
     DataPartStorageOnDiskFull(
         VolumePtr volume_,
         std::string root_path_,
-        std::string part_dir_,
-        ProjectionStorageFormat projection_storage_format_ = ProjectionStorageFormat::LEGACY_NESTED);
+        std::string part_dir_);
 
     MergeTreeDataPartStorageType getType() const override { return MergeTreeDataPartStorageType::Full; }
 
     bool hasProjection(const std::string & name) override;
-    MutableDataPartStoragePtr getProjection(const std::string & name, bool use_parent_transaction = true) override; // NOLINT
-    DataPartStoragePtr getProjection(const std::string & name) const override;
+    /// Defaults live on the base virtual; overrides omit them (clang-tidy google-default-arguments).
+    MutableDataPartStoragePtr getProjection(
+        const std::string & name,
+        bool use_parent_transaction,
+        ProjectionStorageFormat creation_hint) override;
+    DataPartStoragePtr getProjection(
+        const std::string & name,
+        ProjectionStorageFormat creation_hint) const override;
 
     bool exists() const override;
     bool existsDirectory(const std::string & name) const override;
@@ -32,6 +37,18 @@ public:
     String getUniqueId() const override;
 
     void createProjection(const std::string & name) override;
+    void prepareRead(
+        const std::string & name,
+        const ReadSettings & settings,
+        std::optional<size_t> read_hint,
+        ReadPipeline & pipeline) const override;
+
+    std::unique_ptr<ReadBufferFromFileBase> readFileIfExists(
+        const std::string & name,
+        const ReadSettings & settings,
+        std::optional<size_t> read_hint) const override;
+
+    void createProjection(const std::string & name, ProjectionStorageFormat format) override;
 
     std::unique_ptr<WriteBufferFromFileBase> writeFile(
         const String & name,
@@ -65,15 +82,13 @@ private:
         VolumePtr volume_,
         std::string root_path_,
         std::string part_dir_,
-        DiskTransactionPtr transaction_,
-        ProjectionStorageFormat projection_storage_format_ = ProjectionStorageFormat::LEGACY_NESTED);
+        DiskTransactionPtr transaction_);
 
     MutableDataPartStoragePtr create(
         VolumePtr volume_,
         std::string root_path_,
         std::string part_dir_,
-        bool initialize_,
-        ProjectionStorageFormat projection_storage_format_) const override;
+        bool initialize_) const override;
 
     NameSet getActualFileNamesOnDisk(const NameSet & file_names) const override { return file_names; }
 

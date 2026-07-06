@@ -1367,11 +1367,19 @@ void IMergeTreeDataPart::loadColumnsChecksumsIndexes(bool require_columns_checks
     }
 }
 
+IDataPartStorage::ProjectionStorageFormat IMergeTreeDataPart::getProjectionStorageFormat() const
+{
+    return storage.getProjectionStorageFormat();
+}
+
 MergeTreeDataPartBuilder IMergeTreeDataPart::getProjectionPartBuilder(
     const String & projection_name, ProjectionDescriptionRawPtr projection, bool is_temp_projection)
 {
     const char * projection_extension = is_temp_projection ? ".tmp_proj" : ".proj";
-    auto projection_storage = getDataPartStorage().getProjection(projection_name + projection_extension, !is_temp_projection);
+    /// The layout is detected from disk for existing projections; the hint only applies when the
+    /// directory will be created (fresh insert / fetch / materialize), in which case use the table setting.
+    auto projection_storage = getDataPartStorage().getProjection(
+        projection_name + projection_extension, !is_temp_projection, getProjectionStorageFormat());
     MergeTreeDataPartBuilder builder(storage, projection_name, projection_storage, getReadSettings());
     return builder.withPartInfo(MergeListElement::FAKE_RESULT_PART_FOR_PROJECTION).withParentPart(this).withProjection(projection);
 }
@@ -2290,13 +2298,19 @@ void IMergeTreeDataPart::renameTo(const String & new_relative_path, bool remove_
     std::string relative_path = storage.relative_data_path;
     bool fsync_dir = (*storage.getSettings())[MergeTreeSetting::fsync_part_directory];
 
+    /// getRelativePath() appends a trailing slash; drop it so filename()/parent_path() behave.
+    auto strip_slash = [](std::string p) { if (!p.empty() && p.back() == '/') p.pop_back(); return p; };
+    /// A flat projection sits beside its parent as "<parent_dir>.<name>"; a nested one is a child "<name>".
+    auto is_flat_projection = [](const fs::path & projection_dir, const std::string & parent_dir_name)
+    { return projection_dir.filename().string().starts_with(parent_dir_name + "."); };
+
     fs::path to;
     if (parent_part)
     {
-        /// Projection lives inside the parent part dir (legacy) or as a sibling at its root (flat)
-        const auto & parent_storage = parent_part->getDataPartStorage();
-        fs::path parent_rel = parent_storage.getRelativePath();
-        if (parent_storage.getProjectionStorageFormat() == IDataPartStorage::ProjectionStorageFormat::FLAT)
+        /// This part is a projection: it lives inside the parent dir (nested) or beside it (flat).
+        fs::path parent_rel = strip_slash(parent_part->getDataPartStorage().getRelativePath());
+        fs::path this_rel = strip_slash(getDataPartStorage().getRelativePath());
+        if (is_flat_projection(this_rel, parent_rel.filename().string()))
             to = parent_rel.parent_path() / (parent_rel.filename().string() + "." + new_relative_path);
         else
             to = parent_rel / new_relative_path;
@@ -2304,18 +2318,25 @@ void IMergeTreeDataPart::renameTo(const String & new_relative_path, bool remove_
     else
         to = fs::path(relative_path) / new_relative_path;
 
-    auto old_projection_root_path = getDataPartStorage().getRelativePath();
+    auto old_projection_root_path = strip_slash(getDataPartStorage().getRelativePath());
 
     getDataPartStorage().rename(to.parent_path(), to.filename(), storage.log.load(), remove_new_dir_if_exists, fsync_dir);
 
     auto new_projection_root_path = to.string();
 
-    /// Update in-memory projection storage paths to match the moved part
-    const bool flat_projections = getDataPartStorage().getProjectionStorageFormat() == IDataPartStorage::ProjectionStorageFormat::FLAT;
+    /// Update in-memory projection storage paths to match the moved part. Layout is detected per child
+    /// from its on-disk dir name, so this needs no configured format.
+    auto old_parent_name = fs::path(old_projection_root_path).filename().string();
     for (const auto & [projection_name, part] : projection_parts)
     {
-        if (flat_projections)
+        fs::path child_rel = strip_slash(part->getDataPartStorage().getRelativePath());
+        if (is_flat_projection(child_rel, old_parent_name))
+        {
+            /// A flat sibling's root is the part's root (the table data path); only the subdirectory and
+            /// basename change. Move the root to the renamed part's parent, then set the flat basename.
+            part->getDataPartStorage().changeRootPath(relative_path, to.parent_path());
             part->getDataPartStorage().setRelativePath(to.filename().string() + "." + projection_name + ".proj");
+        }
         else
             part->getDataPartStorage().changeRootPath(old_projection_root_path, new_projection_root_path);
     }

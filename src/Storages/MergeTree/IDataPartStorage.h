@@ -113,8 +113,6 @@ public:
         FLAT,
     };
 
-    virtual ProjectionStorageFormat getProjectionStorageFormat() const { return ProjectionStorageFormat::LEGACY_NESTED; }
-
     /// Methods to get path components of a data part.
     virtual std::string getFullPath() const = 0;         /// '/var/lib/clickhouse/data/database/table/moving/all_1_5_1'
     virtual std::string getRelativePath() const = 0;     ///                          'database/table/moving/all_1_5_1'
@@ -127,11 +125,17 @@ public:
     /// Checks whether part has projection
     virtual bool hasProjection(const std::string & name) = 0;
 
-    /// Get mutable projection
-    virtual std::shared_ptr<IDataPartStorage> getProjection(const std::string & name, bool use_parent_transaction = true) = 0; // NOLINT
+    /// Get mutable projection. The on-disk layout is detected from disk; `creation_hint` is used only when
+    /// the projection does not exist yet (i.e. the caller is about to create it), so it picks the layout.
+    virtual std::shared_ptr<IDataPartStorage> getProjection( // NOLINT
+        const std::string & name,
+        bool use_parent_transaction = true,
+        ProjectionStorageFormat creation_hint = ProjectionStorageFormat::LEGACY_NESTED) = 0;
 
     /// Get const projection
-    virtual std::shared_ptr<const IDataPartStorage> getProjection(const std::string & name) const = 0;
+    virtual std::shared_ptr<const IDataPartStorage> getProjection( // NOLINT
+        const std::string & name,
+        ProjectionStorageFormat creation_hint = ProjectionStorageFormat::LEGACY_NESTED) const = 0;
 
     /// Part directory exists.
     virtual bool exists() const = 0;
@@ -328,8 +332,8 @@ public:
     virtual void changeRootPath(const std::string & from_root, const std::string & to_root) = 0;
 
     virtual void createDirectories() = 0;
-    /// Creates the on-disk directory for a projection sub-part
-    virtual void createProjection(const std::string & name) = 0;
+    /// Creates the on-disk directory for a projection sub-part in the given layout.
+    virtual void createProjection(const std::string & name, ProjectionStorageFormat format) = 0;
 
     virtual std::unique_ptr<WriteBufferFromFileBase> writeFile(
         const String & name,

@@ -20,10 +20,7 @@ public:
     DataPartStorageOnDiskBase(
         VolumePtr volume_,
         std::string root_path_,
-        std::string part_dir_,
-        ProjectionStorageFormat projection_storage_format_ = ProjectionStorageFormat::LEGACY_NESTED);
-
-    ProjectionStorageFormat getProjectionStorageFormat() const override { return projection_storage_format; }
+        std::string part_dir_);
 
     DataPartProjectionIteratorPtr iterateProjections(bool include_temp) const override;
 
@@ -186,20 +183,17 @@ public:
 
 protected:
 
-    /// TODO: check if default value is needed at c-tor at all (we can't plumb it to create anyway)
     DataPartStorageOnDiskBase(
         VolumePtr volume_,
         std::string root_path_,
         std::string part_dir_,
-        DiskTransactionPtr transaction_,
-        ProjectionStorageFormat projection_storage_format_ = ProjectionStorageFormat::LEGACY_NESTED);
+        DiskTransactionPtr transaction_);
 
     virtual MutableDataPartStoragePtr create(
         VolumePtr volume_,
         std::string root_path_,
         std::string part_dir_,
-        bool initialize_,
-        ProjectionStorageFormat projection_storage_format_) const = 0;
+        bool initialize_) const = 0;
 
     /// Lazily load the per-part skp_idx.packed archive (if any), reading it as a standalone disk
     /// file. Subsequent calls return the cached reader, or nullptr when there is no such file --
@@ -249,7 +243,6 @@ protected:
     VolumePtr volume;
     std::string root_path;
     std::string part_dir;
-    ProjectionStorageFormat projection_storage_format;
     DiskTransactionPtr transaction;
     bool has_shared_transaction = false;
 

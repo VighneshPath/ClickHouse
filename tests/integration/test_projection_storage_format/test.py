@@ -180,65 +180,65 @@ def test_remove_cleans_flat_siblings():
 
 # Issue #2: FREEZE must copy flat projection siblings.
 # @pytest.mark.xfail(reason=REVIEW + "3472535412", strict=False)
-# def test_freeze_includes_flat_projection():
-#     setup_table("t_freeze", "projection_storage_format = 'flat'")
-#     node.query("ALTER TABLE t_freeze FREEZE WITH NAME 'flatproj'")
-#     found = node.exec_in_container(
-#         ["bash", "-c", "find /var/lib/clickhouse/shadow/flatproj -name '*p.proj' | head -1"],
-#         privileged=True,
-#         user="root",
-#     ).strip()
-#     assert found != ""
+def test_freeze_includes_flat_projection():
+    setup_table("t_freeze", "projection_storage_format = 'flat'")
+    node.query("ALTER TABLE t_freeze FREEZE WITH NAME 'flatproj'")
+    found = node.exec_in_container(
+        ["bash", "-c", "find /var/lib/clickhouse/shadow/flatproj -name '*p.proj' | head -1"],
+        privileged=True,
+        user="root",
+    ).strip()
+    assert found != ""
 
 
 # Issue #2: ATTACH PARTITION FROM (clonePart) must copy flat projection siblings.
 # @pytest.mark.xfail(reason=REVIEW + "3472535412", strict=False)
-# def test_attach_partition_from_clones_flat():
-#     setup_table("t_src", "projection_storage_format = 'flat'")
-#     setup_table("t_dst", "projection_storage_format = 'flat'")
-#     node.query("TRUNCATE TABLE t_dst")
-#     node.query("ALTER TABLE t_dst ATTACH PARTITION tuple() FROM t_src")
-#     p = part_dir("t_dst")
-#     assert path_exists(f"{p}.p.proj")
-#     assert proj_query("t_dst") == proj_query("t_src")
-#
-#
-# # Issue #3: a part loaded from disk after restart must keep its flat layout for later operations.
-# # @pytest.mark.xfail(reason=REVIEW + "3472535414", strict=False)
-# def test_flat_layout_after_restart_operations():
-#     setup_table("t_reload", "projection_storage_format = 'flat'")
-#     baseline = proj_query("t_reload")
-#     node.restart_clickhouse()
-#     name = part_name("t_reload")
-#     node.query(f"ALTER TABLE t_reload DETACH PART '{name}'")
-#     node.query(f"ALTER TABLE t_reload ATTACH PART '{name}'")
-#     p = part_dir("t_reload")
-#     assert path_exists(f"{p}.p.proj")
-#     assert proj_query("t_reload") == baseline
-#
-#
-# # Issue #5: replicated fetch must materialize projections in the flat layout.
-# # @pytest.mark.xfail(reason=REVIEW + "3473479560", strict=False)
-# def test_replicated_fetch_flat_layout():
-#     for n, replica in ((node, "1"), (node2, "2")):
-#         n.query("DROP TABLE IF EXISTS t_repl SYNC")
-#         n.query("SYSTEM STOP MERGES")
-#         n.query(
-#             f"""CREATE TABLE t_repl (key UInt64, id UInt64, value String,
-#                 PROJECTION p (SELECT key, id, value ORDER BY id))
-#                 ENGINE = ReplicatedMergeTree('/clickhouse/tables/t_repl', '{replica}')
-#                 ORDER BY key
-#                 SETTINGS min_bytes_for_wide_part = 0, projection_storage_format = 'flat'"""
-#         )
-#     node.query(
-#         "INSERT INTO t_repl SELECT number, number * 2, toString(number) FROM numbers(1000)"
-#     )
-#     node2.query("SYSTEM SYNC REPLICA t_repl")
-#     p = part_dir("t_repl", node2)
-#     assert path_exists(f"{p}.p.proj", node2)
-#     assert proj_query("t_repl", node2) == proj_query("t_repl", node)
-#
-#
+def test_attach_partition_from_clones_flat():
+    setup_table("t_src", "projection_storage_format = 'flat'")
+    setup_table("t_dst", "projection_storage_format = 'flat'")
+    node.query("TRUNCATE TABLE t_dst")
+    node.query("ALTER TABLE t_dst ATTACH PARTITION tuple() FROM t_src")
+    p = part_dir("t_dst")
+    assert path_exists(f"{p}.p.proj")
+    assert proj_query("t_dst") == proj_query("t_src")
+
+
+# Issue #3: a part loaded from disk after restart must keep its flat layout for later operations.
+# @pytest.mark.xfail(reason=REVIEW + "3472535414", strict=False)
+def test_flat_layout_after_restart_operations():
+    setup_table("t_reload", "projection_storage_format = 'flat'")
+    baseline = proj_query("t_reload")
+    node.restart_clickhouse()
+    name = part_name("t_reload")
+    node.query(f"ALTER TABLE t_reload DETACH PART '{name}'")
+    node.query(f"ALTER TABLE t_reload ATTACH PART '{name}'")
+    p = part_dir("t_reload")
+    assert path_exists(f"{p}.p.proj")
+    assert proj_query("t_reload") == baseline
+
+
+# Issue #5: replicated fetch must materialize projections in the flat layout.
+# @pytest.mark.xfail(reason=REVIEW + "3473479560", strict=False)
+def test_replicated_fetch_flat_layout():
+    for n, replica in ((node, "1"), (node2, "2")):
+        n.query("DROP TABLE IF EXISTS t_repl SYNC")
+        n.query("SYSTEM STOP MERGES")
+        n.query(
+            f"""CREATE TABLE t_repl (key UInt64, id UInt64, value String,
+                PROJECTION p (SELECT key, id, value ORDER BY id))
+                ENGINE = ReplicatedMergeTree('/clickhouse/tables/t_repl', '{replica}')
+                ORDER BY key
+                SETTINGS min_bytes_for_wide_part = 0, projection_storage_format = 'flat'"""
+        )
+    node.query(
+        "INSERT INTO t_repl SELECT number, number * 2, toString(number) FROM numbers(1000)"
+    )
+    node2.query("SYSTEM SYNC REPLICA t_repl")
+    p = part_dir("t_repl", node2)
+    assert path_exists(f"{p}.p.proj", node2)
+    assert proj_query("t_repl", node2) == proj_query("t_repl", node)
+
+
 # # Issue #6: CHECK TABLE must tolerate an unknown flat projection (dropped while detached).
 # # @pytest.mark.xfail(reason=REVIEW + "3473479564", strict=False)
 # def test_check_table_after_dropped_projection():
@@ -250,19 +250,19 @@ def test_remove_cleans_flat_siblings():
 #     assert check_table("t_chk") == "1"
 #
 #
-# # Issues #7 and #8: DETACH/ATTACH moves the part under detached/; the flat sibling must follow.
-# # @pytest.mark.xfail(reason=REVIEW + "3473543140", strict=False)
-# def test_detach_attach_flat_part():
-#     setup_table("t_da", "projection_storage_format = 'flat'")
-#     baseline = proj_query("t_da")
-#     name = part_name("t_da")
-#     node.query(f"ALTER TABLE t_da DETACH PART '{name}'")
-#     node.query(f"ALTER TABLE t_da ATTACH PART '{name}'")
-#     p = part_dir("t_da")
-#     assert path_exists(f"{p}.p.proj")
-#     assert proj_query("t_da") == baseline
-#
-#
+# Issues #7 and #8: DETACH/ATTACH moves the part under detached/; the flat sibling must follow.
+# @pytest.mark.xfail(reason=REVIEW + "3473543140", strict=False)
+def test_detach_attach_flat_part():
+    setup_table("t_da", "projection_storage_format = 'flat'")
+    baseline = proj_query("t_da")
+    name = part_name("t_da")
+    node.query(f"ALTER TABLE t_da DETACH PART '{name}'")
+    node.query(f"ALTER TABLE t_da ATTACH PART '{name}'")
+    p = part_dir("t_da")
+    assert path_exists(f"{p}.p.proj")
+    assert proj_query("t_da") == baseline
+
+
 # # Issue #12: reloading a part in place must not mark a present flat projection as broken.
 # # @pytest.mark.xfail(reason=REVIEW + "3481208077", strict=False)
 # def test_flat_projection_not_broken_on_reload():

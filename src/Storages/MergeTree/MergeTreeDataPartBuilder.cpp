@@ -17,25 +17,6 @@ namespace ErrorCodes
     extern const int UNKNOWN_PART_TYPE;
 }
 
-namespace MergeTreeSetting
-{
-    extern const MergeTreeSettingsProjectionStorageFormat projection_storage_format;
-}
-
-namespace
-{
-    IDataPartStorage::ProjectionStorageFormat toStorageProjectionFormat(ProjectionStorageFormat format)
-    {
-        switch (format)
-        {
-            case ProjectionStorageFormat::LEGACY_NESTED:
-                return IDataPartStorage::ProjectionStorageFormat::LEGACY_NESTED;
-            case ProjectionStorageFormat::FLAT:
-                return IDataPartStorage::ProjectionStorageFormat::FLAT;
-        }
-    }
-}
-
 MergeTreeDataPartBuilder::MergeTreeDataPartBuilder(
     const MergeTreeData & data_, String name_, VolumePtr volume_, String root_path_, String part_dir_, const ReadSettings & read_settings_)
     : data(data_)
@@ -110,8 +91,7 @@ MutableDataPartStoragePtr MergeTreeDataPartBuilder::getPartStorageByType(
     const VolumePtr & volume_,
     const String & root_path_,
     const String & part_dir_,
-    const ReadSettings &, /// Unused here, but used in private repo.
-    IDataPartStorage::ProjectionStorageFormat projection_format)
+    const ReadSettings &) /// Unused here, but used in private repo.
 {
     if (!volume_)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot create part storage, because volume is not specified");
@@ -120,7 +100,7 @@ MutableDataPartStoragePtr MergeTreeDataPartBuilder::getPartStorageByType(
     switch (storage_type_.getValue())
     {
         case Type::Full:
-            return std::make_shared<DataPartStorageOnDiskFull>(volume_, root_path_, part_dir_, projection_format);
+            return std::make_shared<DataPartStorageOnDiskFull>(volume_, root_path_, part_dir_);
         default:
             throw Exception(ErrorCodes::UNKNOWN_PART_TYPE,
                 "Unknown type of storage for part {}", fs::path(root_path_) / part_dir_);
@@ -156,8 +136,7 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartType(MergeTreeDataP
 
 MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartStorageType(MergeTreeDataPartStorageType storage_type_)
 {
-    auto projection_format = toStorageProjectionFormat((*data.getSettings())[MergeTreeSetting::projection_storage_format]);
-    part_storage = getPartStorageByType(storage_type_, volume, root_path, part_dir, read_settings, projection_format);
+    part_storage = getPartStorageByType(storage_type_, volume, root_path, part_dir, read_settings);
     return *this;
 }
 

@@ -312,6 +312,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsBool prewarm_primary_key_cache;
     extern const MergeTreeSettingsBool prewarm_mark_cache;
     extern const MergeTreeSettingsBool primary_key_lazy_load;
+    extern const MergeTreeSettingsProjectionStorageFormat projection_storage_format;
     extern const MergeTreeSettingsBool apply_patches_on_merge;
     extern const MergeTreeSettingsBool enforce_index_structure_match_on_partition_manipulation;
     extern const MergeTreeSettingsUInt64 min_bytes_to_prewarm_caches;
@@ -5483,6 +5484,18 @@ void MergeTreeData::PartsTemporaryRename::tryRenameAll()
                 throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Empty part name. Most likely it's a bug.");
             const auto full_path = fs::path(storage.relative_data_path) / source_dir;
             disk->moveDirectory(fs::path(full_path) / old_dir, fs::path(full_path) / new_dir);
+
+            /// Move FLAT projection siblings ("<old_dir>.<projection>.proj") alongside the part dir.
+            const String flat_prefix = old_dir + ".";
+            Strings flat_siblings;
+            for (auto it = disk->iterateDirectory(full_path); it->isValid(); it->next())
+            {
+                const String entry = it->name();
+                if (startsWith(entry, flat_prefix) && (endsWith(entry, ".proj") || endsWith(entry, ".tmp_proj")))
+                    flat_siblings.push_back(entry);
+            }
+            for (const auto & entry : flat_siblings)
+                disk->moveDirectory(fs::path(full_path) / entry, fs::path(full_path) / (new_dir + entry.substr(old_dir.size())));
         }
         catch (...)
         {
@@ -5510,6 +5523,18 @@ void MergeTreeData::PartsTemporaryRename::rollBackAll()
         {
             const String full_path = fs::path(storage.relative_data_path) / source_dir;
             disk->moveFile(fs::path(full_path) / new_dir, fs::path(full_path) / old_dir);
+
+            /// Roll back FLAT projection siblings moved in tryRenameAll ("<new_dir>.<projection>.proj").
+            const String flat_prefix = new_dir + ".";
+            Strings flat_siblings;
+            for (auto it = disk->iterateDirectory(full_path); it->isValid(); it->next())
+            {
+                const String entry = it->name();
+                if (startsWith(entry, flat_prefix) && (endsWith(entry, ".proj") || endsWith(entry, ".tmp_proj")))
+                    flat_siblings.push_back(entry);
+            }
+            for (const auto & entry : flat_siblings)
+                disk->moveFile(fs::path(full_path) / entry, fs::path(full_path) / (old_dir + entry.substr(new_dir.size())));
         }
         catch (...)
         {
@@ -11243,6 +11268,13 @@ MergeTreeSettingsPtr MergeTreeData::getSettings(const SettingsChanges * settings
     }
 
     return data_settings;
+}
+
+IDataPartStorage::ProjectionStorageFormat MergeTreeData::getProjectionStorageFormat() const
+{
+    if ((*getSettings())[MergeTreeSetting::projection_storage_format] == ProjectionStorageFormat::FLAT)
+        return IDataPartStorage::ProjectionStorageFormat::FLAT;
+    return IDataPartStorage::ProjectionStorageFormat::LEGACY_NESTED;
 }
 
 StorageMetadataHandle MergeTreeData::getInMemoryMetadataPtr(ContextPtr query_context, bool bypass_metadata_cache) const

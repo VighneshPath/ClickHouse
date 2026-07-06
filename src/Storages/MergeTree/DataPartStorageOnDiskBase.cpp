@@ -54,12 +54,10 @@ std::unique_ptr<ReadBufferFromFileBase> IDataPartStorage::readFile(
 DataPartStorageOnDiskBase::DataPartStorageOnDiskBase(
     VolumePtr volume_,
     std::string root_path_,
-    std::string part_dir_,
-    ProjectionStorageFormat projection_storage_format_)
+    std::string part_dir_)
     : volume(std::move(volume_))
     , root_path(std::move(root_path_))
     , part_dir(std::move(part_dir_))
-    , projection_storage_format(projection_storage_format_)
 {
 }
 
@@ -67,12 +65,10 @@ DataPartStorageOnDiskBase::DataPartStorageOnDiskBase(
     VolumePtr volume_,
     std::string root_path_,
     std::string part_dir_,
-    DiskTransactionPtr transaction_,
-    ProjectionStorageFormat projection_storage_format_)
+    DiskTransactionPtr transaction_)
     : volume(std::move(volume_))
     , root_path(std::move(root_path_))
     , part_dir(std::move(part_dir_))
-    , projection_storage_format(projection_storage_format_)
     , transaction(std::move(transaction_))
     , has_shared_transaction(transaction != nullptr)
 {
@@ -184,8 +180,7 @@ bool DataPartStorageOnDiskBase::looksLikeBrokenDetachedPartHasTheSameContent(con
         volume,
         fs::path(root_path) / MergeTreeData::DETACHED_DIR_NAME,
         detached_part_path,
-        /*initialize=*/ true,
-        projection_storage_format);
+        /*initialize=*/ true);
     if (!storage_from_detached->existsFile("checksums.txt"))
         return false;
 
@@ -542,6 +537,26 @@ MutableDataPartStoragePtr DataPartStorageOnDiskBase::freeze(
         params.files_to_copy_instead_of_hardlinks,
         params.external_transaction);
 
+    /// Nested projections are inside the part dir and copied above; FLAT projection siblings live next to
+    /// it, so copy each to the matching sibling of the destination.
+    for (auto proj = iterateProjections(/*include_temp=*/ false); proj->isValid(); proj->next())
+    {
+        if (proj->format() != ProjectionStorageFormat::FLAT)
+            continue;
+        Backup(
+            disk,
+            disk,
+            fs::path(proj->rootPath()) / proj->realName(),
+            fs::path(to) / (dir_path + "." + proj->name()),
+            read_settings,
+            write_settings,
+            params.make_source_readonly,
+            /* max_level= */ {},
+            params.copy_instead_of_hardlink,
+            params.files_to_copy_instead_of_hardlinks,
+            params.external_transaction);
+    }
+
     if (save_metadata_callback)
         save_metadata_callback(disk);
 
@@ -573,8 +588,7 @@ MutableDataPartStoragePtr DataPartStorageOnDiskBase::freeze(
     bool to_detached = dir_path.starts_with(std::string_view((fs::path(MergeTreeData::DETACHED_DIR_NAME) / "").string()));
     return create(
         single_disk_volume, to, dir_path,
-        /*initialize=*/ !to_detached && !params.external_transaction,
-        projection_storage_format);
+        /*initialize=*/ !to_detached && !params.external_transaction);
 }
 
 MutableDataPartStoragePtr DataPartStorageOnDiskBase::freezeRemote(
@@ -606,6 +620,26 @@ MutableDataPartStoragePtr DataPartStorageOnDiskBase::freezeRemote(
         true,
         /* files_to_copy_intead_of_hardlinks= */ {},
         params.external_transaction);
+
+    /// Nested projections are inside the part dir and copied above; FLAT projection siblings live next to
+    /// it, so copy each to the matching sibling of the destination.
+    for (auto proj = iterateProjections(/*include_temp=*/ false); proj->isValid(); proj->next())
+    {
+        if (proj->format() != ProjectionStorageFormat::FLAT)
+            continue;
+        Backup(
+            src_disk,
+            dst_disk,
+            fs::path(proj->rootPath()) / proj->realName(),
+            fs::path(to) / (dir_path + "." + proj->name()),
+            read_settings,
+            write_settings,
+            params.make_source_readonly,
+            /* max_level= */ {},
+            true,
+            /* files_to_copy_intead_of_hardlinks= */ {},
+            params.external_transaction);
+    }
 
     /// The save_metadata_callback function acts on the target dist.
     if (save_metadata_callback)
@@ -639,8 +673,7 @@ MutableDataPartStoragePtr DataPartStorageOnDiskBase::freezeRemote(
     bool to_detached = dir_path.starts_with(std::string_view((fs::path(MergeTreeData::DETACHED_DIR_NAME) / "").string()));
     return create(
         single_disk_volume, to, dir_path,
-        /*initialize=*/ !to_detached && !params.external_transaction,
-        projection_storage_format);
+        /*initialize=*/ !to_detached && !params.external_transaction);
 }
 
 MutableDataPartStoragePtr DataPartStorageOnDiskBase::clonePart(
@@ -662,10 +695,25 @@ MutableDataPartStoragePtr DataPartStorageOnDiskBase::clonePart(
                         dir_path, getRelativePath(), path_to_clone, fullPath(dst_disk, path_to_clone));
     }
 
+    /// Nested projections are inside the part dir and copied with it; FLAT projection siblings live next to
+    /// it, so copy each to the matching sibling of the destination.
+    std::vector<std::pair<String, String>> flat_projection_copies;
+    for (auto proj = iterateProjections(/*include_temp=*/ false); proj->isValid(); proj->next())
+    {
+        if (proj->format() != ProjectionStorageFormat::FLAT)
+            continue;
+        String proj_from = fs::path(proj->rootPath()) / proj->realName();
+        String proj_to = fs::path(to) / (dir_path + "." + proj->name());
+        flat_projection_copies.emplace_back(std::move(proj_from), std::move(proj_to));
+    }
+
     try
     {
         dst_disk->createDirectories(to);
         src_disk->copyDirectoryContent(getRelativePath(), dst_disk, path_to_clone, read_settings, write_settings, cancellation_hook);
+
+        for (const auto & [proj_from, proj_to] : flat_projection_copies)
+            src_disk->copyDirectoryContent(proj_from, dst_disk, proj_to, read_settings, write_settings, cancellation_hook);
     }
     catch (...)
     {
@@ -673,11 +721,17 @@ MutableDataPartStoragePtr DataPartStorageOnDiskBase::clonePart(
         /// because we've just did full copy through copyDirectoryContent
         LOG_WARNING(log, "Removing directory {} after failed attempt to move a data part", path_to_clone);
         dst_disk->removeRecursive(path_to_clone);
+
+        for (const auto & [proj_from, proj_to] : flat_projection_copies)
+        {
+            if (dst_disk->existsDirectory(proj_to))
+                dst_disk->removeRecursive(proj_to);
+        }
         throw;
     }
 
     auto single_disk_volume = std::make_shared<SingleDiskVolume>(dst_disk->getName(), dst_disk, 0);
-    return create(single_disk_volume, to, dir_path, /*initialize=*/ true, projection_storage_format);
+    return create(single_disk_volume, to, dir_path, /*initialize=*/ true);
 }
 
 void DataPartStorageOnDiskBase::rename(
@@ -721,18 +775,16 @@ void DataPartStorageOnDiskBase::rename(
 
     String from = getRelativePath();
 
-    /// Relocate FLAT projection siblings (nested ones move with the part dir)
+    /// Relocate FLAT projection siblings (nested ones move with the part dir). Layout is detected per
+    /// projection by iterateProjections, so this needs no configured format.
     std::vector<std::pair<String, String>> flat_projection_moves;
-    if (projection_storage_format == ProjectionStorageFormat::FLAT)
+    for (auto proj = iterateProjections(/*include_temp=*/ false); proj->isValid(); proj->next())
     {
-        for (auto proj = iterateProjections(/*include_temp=*/ false); proj->isValid(); proj->next())
-        {
-            if (proj->format() != ProjectionStorageFormat::FLAT)
-                continue;
-            String proj_from = fs::path(proj->rootPath()) / proj->realName();
-            String proj_to = fs::path(new_root_path) / (new_part_dir + "." + proj->name());
-            flat_projection_moves.emplace_back(std::move(proj_from), std::move(proj_to));
-        }
+        if (proj->format() != ProjectionStorageFormat::FLAT)
+            continue;
+        String proj_from = fs::path(proj->rootPath()) / proj->realName();
+        String proj_to = fs::path(new_root_path) / (new_part_dir + "." + proj->name());
+        flat_projection_moves.emplace_back(std::move(proj_from), std::move(proj_to));
     }
 
     /// Why?
@@ -794,10 +846,13 @@ public:
         : disk(std::move(disk_))
         , root(std::move(root_))
         , part_dir(std::move(part_dir_))
-        , flat_prefix(part_dir + ".")
+        , flat_prefix(fs::path(part_dir).filename().string() + ".")
+        /// Flat siblings live next to the part dir, so scan the dir that contains it (handles a part
+        /// under a subdirectory like "moving/all_1_1_1" or "detached/all_1_1_1").
+        , flat_root((fs::path(root) / fs::path(part_dir).parent_path()).string())
         , include_temp(include_temp_)
         , nested(disk->iterateDirectory(fs::path(root) / part_dir))
-        , flat(disk->iterateDirectory(root))
+        , flat(disk->iterateDirectory(flat_root))
     {
         locate();
     }
@@ -858,7 +913,7 @@ private:
                 {
                     norm_name = stripped;
                     real_name = entry;
-                    cur_root = root;
+                    cur_root = flat_root;
                     cur_format = IDataPartStorage::ProjectionStorageFormat::FLAT;
                     return;
                 }
@@ -871,6 +926,7 @@ private:
     std::string root;
     std::string part_dir;
     std::string flat_prefix;
+    std::string flat_root;
     bool include_temp;
 
     DirectoryIteratorPtr nested;
@@ -921,7 +977,7 @@ void DataPartStorageOnDiskBase::remove(
 
     struct ProjectionToRemove
     {
-        IDataPartStorage::ProjectionStorageFormat format;
+        bool is_flat;                       /// flat sibling (true) or nested child (false)
         String source;                      /// proj dir before the rename
         String destination;                 /// proj dir after the rename
         MutableDataPartStoragePtr storage;  /// handle at the destination (used to read its checksums)
@@ -1004,16 +1060,19 @@ void DataPartStorageOnDiskBase::remove(
             if (!projection_storage->exists())
                 return;
 
-            auto format = projection_storage->getProjectionStorageFormat();
-            auto destination = (format == ProjectionStorageFormat::FLAT)
-                ? create(volume, root_path, part_dir_without_slash.string() + "." + proj_name, /*initialize=*/ true, projection_storage_format)
-                : create(volume, to, proj_name, /*initialize=*/ true, projection_storage_format);
+            String source = strip_trailing_slash(projection_storage->getRelativePath());
+            /// A flat sibling dir is "<part_dir>.<name>"; a nested child is just "<name>".
+            bool is_flat = fs::path(source).filename().string().starts_with(fs::path(part_dir).filename().string() + ".");
+
+            auto destination = is_flat
+                ? create(volume, root_path, part_dir_without_slash.string() + "." + proj_name, /*initialize=*/ true)
+                : create(volume, to, proj_name, /*initialize=*/ true);
 
             all_projections.emplace(
                 proj_name,
                 ProjectionToRemove{
-                    format,
-                    strip_trailing_slash(projection_storage->getRelativePath()),
+                    is_flat,
+                    std::move(source),
                     strip_trailing_slash(destination->getRelativePath()),
                     destination});
         };
@@ -1028,7 +1087,7 @@ void DataPartStorageOnDiskBase::remove(
             disk->moveDirectory(from, to);
 
             for (const auto & [_, projection] : all_projections)
-                if (projection.format == ProjectionStorageFormat::FLAT)
+                if (projection.is_flat)
                     disk->moveDirectory(projection.source, projection.destination);
             /// NOTE: we intentionally don't update part_dir here because it would cause a data race
             /// with concurrent readers (e.g. system.parts table queries calling getFullPath()).
