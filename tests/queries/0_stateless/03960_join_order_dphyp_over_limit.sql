@@ -1,3 +1,7 @@
+-- Tags: long
+-- long: an 11-table join with statistics is fast per run (~0.2s) but the flaky check
+-- reruns it many times under debug+sanitizers, exceeding the 180s per-test budget. The
+-- `long` tag exempts it from that budget and reduces the rerun count.
 -- Over-limit partial optimization: N=11 tables, limit=10.
 -- The optimizer sees at most 10 relations; the 11th table is added on top
 -- of the optimized sub-plan without reordering.
