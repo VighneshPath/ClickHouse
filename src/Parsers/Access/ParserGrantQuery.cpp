@@ -82,7 +82,7 @@ namespace
 
             ASTPtr ast;
             ParserRolesOrUsersSet roles_p;
-            roles_p.allowRoles().allowUsers().allowCurrentUser().allowAll(is_revoke);
+            roles_p.allowRoles().allowUsers().allowCurrentUser().allowAll(is_revoke).allowQueryParameters();
             if (!roles_p.parse(pos, ast, expected))
                 return false;
 
@@ -199,7 +199,11 @@ bool ParserGrantQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     query->cluster = std::move(cluster);
     query->access_rights_elements = std::move(elements);
     query->roles = std::move(roles);
+    if (query->roles)
+        query->children.push_back(query->roles);
     query->grantees = std::move(grantees);
+    if (query->grantees)
+        query->children.push_back(query->grantees);
     query->admin_option = admin_option;
     query->replace_access = replace_access;
     query->replace_granted_roles = replace_role;

@@ -18,7 +18,13 @@ namespace ErrorCodes
 
 void ASTUserNameWithHost::formatImpl(WriteBuffer & ostr, const FormatSettings & settings, FormatState &, FormatStateStacked) const
 {
-    username->format(ostr, settings);
+    if (const auto * identifier = username->as<ASTIdentifier>(); identifier && !identifier->isParam())
+        /// A resolved name is a plain string rather than an identifier: format it with backticks only
+        /// when necessary, unaffected by identifier formatting settings (e.g. enforce_strict_identifier_format).
+        ostr << backQuoteIfNeed(getIdentifierName(username));
+    else
+        username->format(ostr, settings);
+
     if (host_pattern)
     {
         ostr << "@";
@@ -139,14 +145,10 @@ String ASTUserNameWithHost::getStringFromAST(const ASTPtr & ast) const
         return literal->value.safeGet<String>();
     else if (const auto * identifier = ast->as<ASTIdentifier>())
     {
-        if (!identifier->isParam())
-            return getIdentifierName(identifier);
+        if (identifier->isParam())
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "An unsubstituted query parameter cannot be used as a user or role name");
 
-        WriteBufferFromOwnString buf;
-        FormatSettings settings(true);
-
-        identifier->format(buf, settings);
-        return buf.str();
+        return getIdentifierName(identifier);
     }
 
     throw Exception(

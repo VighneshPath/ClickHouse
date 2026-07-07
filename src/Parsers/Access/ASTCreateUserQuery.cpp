@@ -189,7 +189,10 @@ ASTPtr ASTCreateUserQuery::clone() const
     res->authentication_methods.clear();
 
     if (names)
+    {
         res->names = boost::static_pointer_cast<ASTUserNamesWithHost>(names->clone());
+        res->children.push_back(res->names);
+    }
 
     if (roles)
         res->roles = boost::static_pointer_cast<ASTRolesOrUsersSet>(roles->clone());

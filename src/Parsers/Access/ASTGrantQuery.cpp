@@ -30,12 +30,19 @@ String ASTGrantQuery::getID(char) const
 ASTPtr ASTGrantQuery::clone() const
 {
     auto res = make_intrusive<ASTGrantQuery>(*this);
+    res->children.clear();
 
     if (roles)
+    {
         res->roles = boost::static_pointer_cast<ASTRolesOrUsersSet>(roles->clone());
+        res->children.push_back(res->roles);
+    }
 
     if (grantees)
+    {
         res->grantees = boost::static_pointer_cast<ASTRolesOrUsersSet>(grantees->clone());
+        res->children.push_back(res->grantees);
+    }
 
     return res;
 }

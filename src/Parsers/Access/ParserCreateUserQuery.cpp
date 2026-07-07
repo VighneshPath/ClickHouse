@@ -9,7 +9,6 @@
 #include <Parsers/Access/ParserSettingsProfileElement.h>
 #include <Parsers/Access/ParserUserNameWithHost.h>
 #include <Parsers/Access/ParserPublicSSHKey.h>
-#include <Parsers/Access/parseUserName.h>
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/CommonParsers.h>
 #include <Parsers/ExpressionElementParsers.h>
@@ -42,11 +41,13 @@ namespace
             if (!ParserKeyword{Keyword::RENAME_TO}.ignore(pos, expected))
                 return false;
 
-            String maybe_new_name;
-            if (!parseUserName(pos, expected, maybe_new_name, /*allow_query_parameter=*/true))
+            ASTPtr new_name_ast;
+            /// The new name is flattened to a String at parse time, so a query parameter here could never be
+            /// substituted and would be used as a literal name -- reject it (same as the role RENAME TO path).
+            if (!ParserUserNameWithHost(/*allow_query_parameter=*/ false).parse(pos, new_name_ast, expected))
                 return false;
 
-            new_name.emplace(std::move(maybe_new_name));
+            new_name = new_name_ast->as<const ASTUserNameWithHost &>().toString();
             return true;
         });
     }
@@ -576,7 +577,7 @@ bool ParserCreateUserQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expec
     }
 
     ASTPtr names_ast;
-    if (!ParserUserNamesWithHost(/*allow_query_parameter=*/true).parse(pos, names_ast, expected))
+    if (!ParserUserNamesWithHost(/*allow_query_parameter=*/true, /*parse_host_pattern=*/true).parse(pos, names_ast, expected))
         return false;
     auto names = boost::static_pointer_cast<ASTUserNamesWithHost>(names_ast);
 
@@ -753,6 +754,9 @@ bool ParserCreateUserQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expec
     query->reset_authentication_methods_to_new = reset_authentication_methods_to_new;
     query->add_identified_with = parsed_add_identified_with;
     query->replace_authentication_methods = parsed_identified_with;
+
+    if (query->names)
+        query->children.push_back(query->names);
 
     for (const auto & authentication_method : query->authentication_methods)
     {

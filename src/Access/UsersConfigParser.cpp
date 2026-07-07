@@ -83,10 +83,11 @@ namespace
 
         if (query.roles)
         {
+            const auto role_names = query.roles->names ? query.roles->names->toStrings() : Strings{};
             std::vector<UUID> roles_to_grant;
-            roles_to_grant.reserve(query.roles->size());
+            roles_to_grant.reserve(role_names.size());
 
-            for (const auto & role_name : query.roles->names)
+            for (const auto & role_name : role_names)
             {
                 auto role_id = UsersConfigParser::generateID(AccessEntityType::ROLE, role_name);
                 if (!role_ids_from_users_config.contains(role_id))

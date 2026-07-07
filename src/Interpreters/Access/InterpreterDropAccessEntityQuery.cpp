@@ -60,7 +60,7 @@ BlockIO InterpreterDropAccessEntityQuery::execute()
     if (query.type == AccessEntityType::USER)
     {
         auto & view_definer_dependencies = ViewDefinerDependencies::instance();
-        for (const auto & name : query.names)
+        for (const auto & name : query.names->toStrings())
         {
             if (view_definer_dependencies.hasViewDependencies(name))
             {
@@ -79,7 +79,7 @@ BlockIO InterpreterDropAccessEntityQuery::execute()
     else if (query.type == AccessEntityType::MASKING_POLICY)
         do_drop(Strings{query.masking_policy_name->toString()}, query.storage_name);
     else
-        do_drop(query.names, query.storage_name);
+        do_drop(query.names->toStrings(), query.storage_name);
 
     return {};
 }
@@ -93,13 +93,13 @@ AccessRightsElements InterpreterDropAccessEntityQuery::getRequiredAccess() const
     {
         case AccessEntityType::USER:
         {
-            for (const auto & name : query.names)
+            for (const auto & name : query.names->toStrings())
                 res.emplace_back(AccessType::DROP_USER, name);
             return res;
         }
         case AccessEntityType::ROLE:
         {
-            for (const auto & name : query.names)
+            for (const auto & name : query.names->toStrings())
                 res.emplace_back(AccessType::DROP_ROLE, name);
             return res;
         }
