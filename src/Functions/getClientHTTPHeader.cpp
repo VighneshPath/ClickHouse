@@ -6,6 +6,7 @@
 #include <Interpreters/Context.h>
 #include <Core/Field.h>
 #include <Core/Settings.h>
+#include <Poco/String.h>
 
 
 namespace DB
@@ -65,7 +66,7 @@ public:
         {
             Field header;
             source->get(row, header);
-            if (auto it = client_info.http_headers.find(header.safeGet<String>()); it != client_info.http_headers.end())
+            if (auto it = client_info.http_headers.find(Poco::toLower(header.safeGet<String>())); it != client_info.http_headers.end())
                 result->insert(it->second);
             else
                 result->insertDefault();
@@ -89,7 +90,7 @@ The function requires the setting `allow_get_client_http_header` to be enabled.
 The setting is not enabled by default for security reasons, because some headers, such as `Cookie`, could contain sensitive info.
 :::
 
-HTTP headers are case sensitive for this function.
+HTTP headers are case-insensitive per RFC 7230.
 If the function is used in the context of a distributed query, it returns non-empty result only on the initiator node.
 )";
     FunctionDocumentation::Syntax syntax = "getClientHTTPHeader(name)";
