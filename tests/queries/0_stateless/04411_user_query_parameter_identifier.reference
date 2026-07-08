@@ -12,4 +12,6 @@
 0
 2
 0
+1
+0
 GRANT SELECT ON *.* TO {g:Identifier}

@@ -54,12 +54,12 @@ namespace
     }
 
 
-    bool parseRoles(IParser::Pos & pos, Expected & expected, bool is_revoke, bool id_mode, boost::intrusive_ptr<ASTRolesOrUsersSet> & roles)
+    bool parseRoles(IParser::Pos & pos, Expected & expected, bool is_revoke, bool id_mode, bool allow_query_parameter, boost::intrusive_ptr<ASTRolesOrUsersSet> & roles)
     {
         return IParserBase::wrapParseImpl(pos, [&]
         {
             ParserRolesOrUsersSet roles_p;
-            roles_p.allowRoles().useIDMode(id_mode);
+            roles_p.allowRoles().useIDMode(id_mode).allowQueryParameters(allow_query_parameter);
             if (is_revoke)
                 roles_p.allowAll();
 
@@ -138,7 +138,10 @@ bool ParserGrantQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     }
     else
     {
-        if (!parseAccessRightsElementsWithoutOptions(pos, expected, elements) && !parseRoles(pos, expected, is_revoke, attach_mode, roles))
+        /// Query parameters are not substituted in attach-mode queries (DiskAccessStorage) and in queries
+        /// from the users.xml config, and the granted-role names are resolved there without substitution.
+        if (!parseAccessRightsElementsWithoutOptions(pos, expected, elements)
+            && !parseRoles(pos, expected, is_revoke, attach_mode, /*allow_query_parameter=*/ !attach_mode && !allow_no_grantees, roles))
             return false;
     }
 

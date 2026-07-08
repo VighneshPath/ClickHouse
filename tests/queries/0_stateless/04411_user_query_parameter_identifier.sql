@@ -45,4 +45,14 @@ DROP ROLE {CLICKHOUSE_DATABASE:Identifier}, {CLICKHOUSE_DATABASE_1:Identifier};
 SELECT count() FROM system.roles WHERE name IN (currentDatabase(), currentDatabase() || '_1');
 DROP ROLE {nonexistent_param:Identifier}; -- { serverError UNKNOWN_QUERY_PARAMETER }
 
+-- Query parameters work in the granted-role list of GRANT / REVOKE.
+CREATE USER {CLICKHOUSE_DATABASE:Identifier};
+CREATE ROLE {CLICKHOUSE_DATABASE_1:Identifier};
+GRANT {CLICKHOUSE_DATABASE_1:Identifier} TO {CLICKHOUSE_DATABASE:Identifier};
+SELECT count() FROM system.role_grants WHERE user_name = currentDatabase() AND granted_role_name = currentDatabase() || '_1';
+REVOKE {CLICKHOUSE_DATABASE_1:Identifier} FROM {CLICKHOUSE_DATABASE:Identifier};
+SELECT count() FROM system.role_grants WHERE user_name = currentDatabase() AND granted_role_name = currentDatabase() || '_1';
+DROP USER {CLICKHOUSE_DATABASE:Identifier};
+DROP ROLE {CLICKHOUSE_DATABASE_1:Identifier};
+
 SELECT formatQuery('GRANT SELECT ON *.* TO {g:Identifier}');
