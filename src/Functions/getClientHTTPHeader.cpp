@@ -83,7 +83,7 @@ REGISTER_FUNCTION(GetClientHTTPHeader)
     FunctionDocumentation::Description description = R"(
 Gets the value of an HTTP header.
 If there is no such header or the current request is not performed via the HTTP interface, the function returns an empty string.
-Certain HTTP headers (e.g., `Authentication` and `X-ClickHouse-*`) are restricted.
+Certain HTTP headers (e.g., `Authorization` and `X-ClickHouse-*`) are restricted.
 
 :::note Setting `allow_get_client_http_header` is required
 The function requires the setting `allow_get_client_http_header` to be enabled.
