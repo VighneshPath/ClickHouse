@@ -318,7 +318,13 @@ static IMergeTreeDataPart::Checksums checkDataPart(
         assertEOF(*buf);
     }
 
+    /// Projections may be stored either nested inside the part directory or as flat
+    /// siblings of it, so collect them across both layouts, by their logical names.
     NameSet projections_on_disk;
+    if (!data_part->isProjectionPart())
+        for (auto proj = data_part_storage.iterateProjections(/*include_temp=*/ false); proj->isValid(); proj->next())
+            projections_on_disk.insert(proj->name());
+
     const auto & checksums_txt_files = checksums_txt.files;
     for (auto it = data_part_storage.iterate(); it->isValid(); it->next())
     {
@@ -326,10 +332,7 @@ static IMergeTreeDataPart::Checksums checkDataPart(
 
         /// We will check projections later.
         if (data_part_storage.existsDirectory(file_name) && file_name.ends_with(".proj"))
-        {
-            projections_on_disk.insert(file_name);
             continue;
-        }
 
         auto checksum_it = checksums_data.files.find(file_name);
         /// Skip files that we already calculated. Also skip metadata files that are not checksummed.

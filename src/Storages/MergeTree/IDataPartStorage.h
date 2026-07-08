@@ -123,7 +123,7 @@ public:
     /// virtual std::string getRelativeRootPath() const = 0;
 
     /// Checks whether part has projection
-    virtual bool hasProjection(const std::string & name) = 0;
+    virtual bool hasProjection(const std::string & name) const = 0;
 
     /// Get mutable projection. The on-disk layout is detected from disk; `creation_hint` is used only when
     /// the projection does not exist yet (i.e. the caller is about to create it), so it picks the layout.
@@ -265,6 +265,9 @@ public:
     /// Create a backup of a data part.
     /// This method adds a new entry to backup_entries.
     /// Also creates a new tmp_dir for internal disk (if disk is mentioned the first time).
+    /// `part_dir_in_backup` is the directory name for this part inside the backup; empty means
+    /// the on-disk part directory name. Projection parts pass their logical name ("<name>.proj")
+    /// so the backup layout does not depend on the on-disk projection layout.
     using TemporaryFilesOnDisks = std::map<DiskPtr, std::shared_ptr<TemporaryFileOnDisk>>;
     virtual void backup(
         const MergeTreeDataPartChecksums & checksums,
@@ -275,7 +278,8 @@ public:
         BackupEntries & backup_entries,
         TemporaryFilesOnDisks * temp_dirs,
         bool is_projection_part,
-        bool allow_backup_broken_projection) const = 0;
+        bool allow_backup_broken_projection,
+        const String & part_dir_in_backup) const = 0;
 
     /// Creates hardlinks into 'to/dir_path' for every file in data part.
     /// Some files can be copied instead of hardlinks. It's because of details of zero copy replication

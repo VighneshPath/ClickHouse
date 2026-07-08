@@ -7455,10 +7455,14 @@ MergeTreeData::PartsBackupEntries MergeTreeData::backupParts(
             make_temporary_hard_links,
             backup_entries_from_part,
             &temp_dirs,
-            false, false);
+            /*is_projection_part=*/ false,
+            /*allow_backup_broken_projection=*/ false,
+            /*part_dir_in_backup=*/ {});
 
         auto backup_projection = [&](IDataPartStorage & storage, IMergeTreeDataPart & projection_part)
         {
+            /// Serialize the projection under its logical name, so the backup layout
+            /// does not depend on the on-disk projection layout.
             storage.backup(
                 projection_part.checksums,
                 projection_part.getFileNamesWithoutChecksums(),
@@ -7468,7 +7472,8 @@ MergeTreeData::PartsBackupEntries MergeTreeData::backupParts(
                 backup_entries_from_part,
                 &temp_dirs,
                 projection_part.is_broken,
-                backup_settings.allow_backup_broken_projections);
+                backup_settings.allow_backup_broken_projections,
+                projection_part.name + ".proj");
         };
 
         auto projection_parts = part->getProjectionParts();
@@ -9901,7 +9906,9 @@ std::pair<MergeTreeData::MutableDataPartPtr, scope_guard> MergeTreeData::cloneAn
             const auto & projection_storage = projection_part->getDataPartStorage();
             for (auto it = projection_storage.iterate(); it->isValid(); it->next())
             {
-                auto file_name_with_projection_prefix = fs::path(projection_storage.getPartDirectory()) / it->name();
+                /// The zero-copy keep-list uses the logical projection dir name
+                /// regardless of the on-disk projection layout.
+                auto file_name_with_projection_prefix = fs::path(name + ".proj") / it->name();
                 if (!params.files_to_copy_instead_of_hardlinks.contains(file_name_with_projection_prefix)
                     && it->name() != IMergeTreeDataPart::DELETE_ON_DESTROY_MARKER_FILE_NAME_DEPRECATED
                     && it->name() != VersionMetadata::TXN_VERSION_METADATA_FILE_NAME)

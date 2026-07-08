@@ -125,7 +125,8 @@ public:
         BackupEntries & backup_entries,
         TemporaryFilesOnDisks * temp_dirs,
         bool is_projection_part,
-        bool allow_backup_broken_projection) const override;
+        bool allow_backup_broken_projection,
+        const String & part_dir_in_backup) const override;
 
     MutableDataPartStoragePtr freeze(
         const std::string & to,

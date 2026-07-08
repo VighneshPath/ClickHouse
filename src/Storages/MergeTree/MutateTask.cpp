@@ -2263,8 +2263,9 @@ private:
                 projection_data_part_storage_dst->createHardLinkFrom(
                     *projection_data_part_storage_src, p_it->name(), p_it->name());
 
-                auto file_name_with_projection_prefix = fs::path(projection_data_part_storage_src->getPartDirectory()) / p_it->name();
-                hardlinked_files.insert(file_name_with_projection_prefix);
+                /// The zero-copy keep-list uses the logical projection dir name
+                /// regardless of the on-disk projection layout.
+                hardlinked_files.insert(fs::path(proj->name()) / p_it->name());
             }
         }
 
@@ -2575,12 +2576,12 @@ private:
                 }
                 else
                 {
-                    auto file_name_with_projection_prefix = fs::path(projection_data_part_storage_src->getPartDirectory()) / p_it->name();
-
                     projection_data_part_storage_dst->createHardLinkFrom(
                         *projection_data_part_storage_src, p_it->name(), p_it->name());
 
-                    hardlinked_files.insert(file_name_with_projection_prefix);
+                    /// The zero-copy keep-list uses the logical projection dir name
+                    /// regardless of the on-disk projection layout.
+                    hardlinked_files.insert(fs::path(projection_dir) / p_it->name());
                 }
             }
         }

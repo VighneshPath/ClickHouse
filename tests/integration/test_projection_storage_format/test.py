@@ -100,6 +100,12 @@ def active_projection_parts(name, n=node):
     ).strip()
 
 
+def broken_projection_parts(name, n=node):
+    return n.query(
+        f"SELECT count() FROM system.projection_parts WHERE table = '{name}' AND is_broken"
+    ).strip()
+
+
 def outdated_parts(name, n=node):
     return n.query(
         f"SELECT count() FROM system.parts WHERE table = '{name}' AND active = 0"
@@ -239,18 +245,35 @@ def test_replicated_fetch_flat_layout():
     assert proj_query("t_repl", node2) == proj_query("t_repl", node)
 
 
-# # Issue #6: CHECK TABLE must tolerate an unknown flat projection (dropped while detached).
-# # @pytest.mark.xfail(reason=REVIEW + "3473479564", strict=False)
-# def test_check_table_after_dropped_projection():
-#     setup_table("t_chk", "projection_storage_format = 'flat'")
-#     name = part_name("t_chk")
-#     node.query(f"ALTER TABLE t_chk DETACH PART '{name}'")
-#     node.query("ALTER TABLE t_chk DROP PROJECTION p")
-#     node.query(f"ALTER TABLE t_chk ATTACH PART '{name}'")
-#     assert check_table("t_chk") == "1"
-#
-#
-# Issues #7 and #8: DETACH/ATTACH moves the part under detached/; the flat sibling must follow.
+# Issue #6: CHECK TABLE must classify an unknown flat projection (left over after
+# DROP PROJECTION on a detached part) the same way as a nested one: a projection
+# problem ("unexpected projection directories"), not a broken part. The nested-only
+# directory scan misses flat siblings, so the stale "p.proj" checksums entry is
+# never cleaned and the whole part is reported broken; on ReplicatedMergeTree the
+# part-check thread would then detach the part and try to re-fetch it.
+def test_check_table_after_dropped_projection():
+    for tname, extra in (
+        ("t_chk_nested", ""),
+        ("t_chk_flat", "projection_storage_format = 'flat'"),
+    ):
+        setup_table(tname, extra)
+        name = part_name(tname)
+        node.query(f"ALTER TABLE {tname} DETACH PART '{name}'")
+        node.query(f"ALTER TABLE {tname} DROP PROJECTION p")
+        node.query(f"ALTER TABLE {tname} ATTACH PART '{name}'")
+        result = node.query(
+            f"CHECK TABLE {tname} SETTINGS check_query_single_value_result = 0"
+        )
+        assert "unexpected projection" in result, (tname, result)
+        # the data itself must stay readable
+        assert node.query(f"SELECT count() FROM {tname}").strip() == "1000"
+
+
+
+# Issues #7 and #8: DETACH/ATTACH moves the part under detached/; the flat sibling must follow,
+# both on disk and in the in-memory projection storage. After ATTACH PART the projection part's
+# root must point at the attached location, not at detached/<part>.p.proj, and the projection
+# must stay usable without a silent fallback to the parent part.
 # @pytest.mark.xfail(reason=REVIEW + "3473543140", strict=False)
 def test_detach_attach_flat_part():
     setup_table("t_da", "projection_storage_format = 'flat'")
@@ -259,62 +282,127 @@ def test_detach_attach_flat_part():
     node.query(f"ALTER TABLE t_da DETACH PART '{name}'")
     node.query(f"ALTER TABLE t_da ATTACH PART '{name}'")
     p = part_dir("t_da")
+    table_root = p.rsplit("/", 1)[0]
     assert path_exists(f"{p}.p.proj")
-    assert proj_query("t_da") == baseline
+    # no projection sibling may be left behind under detached/
+    leftover = node.exec_in_container(
+        ["bash", "-c", f"find {table_root}/detached -maxdepth 1 -name '*.proj' | wc -l"],
+        privileged=True,
+        user="root",
+    ).strip()
+    assert leftover == "0"
+    # fail closed: the attached part must serve the projection from its new location
+    assert broken_projection_parts("t_da") == "0"
+    assert (
+        proj_query("t_da", extra_settings="force_optimize_projection = 1") == baseline
+    )
 
 
-# # Issue #12: reloading a part in place must not mark a present flat projection as broken.
-# # @pytest.mark.xfail(reason=REVIEW + "3481208077", strict=False)
-# def test_flat_projection_not_broken_on_reload():
-#     setup_table("t_consist", "projection_storage_format = 'flat'")
-#     baseline = proj_query("t_consist")
-#     node.query("DETACH TABLE t_consist")
-#     node.query("ATTACH TABLE t_consist")
-#     broken = node.query(
-#         "SELECT count() FROM system.projection_parts WHERE table = 't_consist' AND is_broken"
-#     ).strip()
-#     assert broken == "0"
-#     assert proj_query("t_consist") == baseline
+# Issue #12: reloading a part must not mark a present flat projection as broken.
+# The consistency check resolves the "p.proj" checksums entry by probing a nested
+# directory under the part dir, so a flat sibling is reported missing on every
+# load (server restart, DETACH/ATTACH TABLE) and the projection is silently
+# marked broken; queries then fall back to the parent part.
+# @pytest.mark.xfail(reason=REVIEW + "3481208077", strict=False)
+def test_flat_projection_not_broken_on_reload():
+    setup_table("t_consist", "projection_storage_format = 'flat'")
+    baseline = proj_query("t_consist")
+    assert broken_projection_parts("t_consist") == "0"
+    node.restart_clickhouse()
+    assert broken_projection_parts("t_consist") == "0"
+    # fail closed: the projection must actually be used, not silently skipped
+    assert (
+        proj_query("t_consist", extra_settings="force_optimize_projection = 1")
+        == baseline
+    )
+
+
+# Issue #9: BACKUP/RESTORE must store and find flat projection data. Projections
+# must be serialized under their logical name (<part>/p.proj/...), so backups are
+# layout-independent: any version can restore them, and restore of an old backup
+# keeps working. With the physical sibling name (<part>/<part>.p.proj/...) restore
+# recreates a bogus nested directory and the part loads broken.
+def test_backup_restore_flat():
+    setup_table("t_bk", "projection_storage_format = 'flat'")
+    baseline = proj_query("t_bk")
+    node.query("DROP TABLE IF EXISTS t_bk2 SYNC")
+    node.exec_in_container(
+        ["bash", "-c", "rm -rf /var/lib/clickhouse/backups/t_bk"],
+        privileged=True,
+        user="root",
+    )
+    node.query("BACKUP TABLE t_bk TO File('/var/lib/clickhouse/backups/t_bk')")
+    physical_dirs = node.exec_in_container(
+        ["bash", "-c", "find /var/lib/clickhouse/backups/t_bk -type d -name '*.*.proj' | wc -l"],
+        privileged=True,
+        user="root",
+    ).strip()
+    assert physical_dirs == "0"
+    logical_dirs = node.exec_in_container(
+        ["bash", "-c", "find /var/lib/clickhouse/backups/t_bk -type d -name 'p.proj' | wc -l"],
+        privileged=True,
+        user="root",
+    ).strip()
+    assert logical_dirs == "1"
+    node.query("RESTORE TABLE t_bk AS t_bk2 FROM File('/var/lib/clickhouse/backups/t_bk')")
+    assert node.query("SELECT count() FROM t_bk2").strip() == "1000"
+    assert broken_projection_parts("t_bk2") == "0"
+    assert proj_query("t_bk2", extra_settings="force_optimize_projection = 1") == baseline
+    assert check_table("t_bk2") == "1"
+
+
+# Issue #11: on zero-copy storage, a mutation must keep blobs hardlinked by flat
+# projections. The mutation records hardlinked projection files in the zero-copy
+# keep-list; the removal of the source part filters that list by the logical
+# projection dir name ("p.proj/..."), so entries recorded under the physical
+# sibling name ("<part>.p.proj/...") never match and the shared blobs are deleted
+# from under the mutated part.
 #
-#
-# # Issue #9: BACKUP/RESTORE must store and find flat projection data.
-# # @pytest.mark.xfail(reason=REVIEW + "3474101185", strict=False)
-# def test_backup_restore_flat():
-#     setup_table("t_bk", "projection_storage_format = 'flat'")
-#     baseline = proj_query("t_bk")
-#     node.query("DROP TABLE IF EXISTS t_bk2 SYNC")
-#     node.exec_in_container(
-#         ["bash", "-c", "rm -rf /var/lib/clickhouse/backups/t_bk"],
-#         privileged=True,
-#         user="root",
-#     )
-#     node.query("BACKUP TABLE t_bk TO File('/var/lib/clickhouse/backups/t_bk')")
-#     node.query("RESTORE TABLE t_bk AS t_bk2 FROM File('/var/lib/clickhouse/backups/t_bk')")
-#     assert proj_query("t_bk2") == baseline
-#     assert check_table("t_bk2") == "1"
-#
-#
-# # Issue #11: on zero-copy storage, a mutation must keep blobs hardlinked by flat projections.
-# # @pytest.mark.xfail(reason=REVIEW + "3480506335", strict=False)
-# def test_zero_copy_mutation_preserves_flat_projection():
-#     node.query("DROP TABLE IF EXISTS t_zc SYNC")
-#     node.query("SYSTEM STOP MERGES")
-#     node.query(
-#         """CREATE TABLE t_zc (key UInt64, id UInt64, value String,
-#             PROJECTION p (SELECT key, id, value ORDER BY id))
-#             ENGINE = ReplicatedMergeTree('/clickhouse/tables/t_zc', '1')
-#             ORDER BY key
-#             SETTINGS min_bytes_for_wide_part = 0, projection_storage_format = 'flat',
-#                 storage_policy = 's3', allow_remote_fs_zero_copy_replication = 1,
-#                 old_parts_lifetime = 1"""
-#     )
-#     node.query(
-#         "INSERT INTO t_zc SELECT number, number * 2, toString(number) FROM numbers(1000)"
-#     )
-#     baseline = proj_query("t_zc")
-#     node.query(
-#         "ALTER TABLE t_zc UPDATE value = concat(value, 'x') WHERE 1 SETTINGS mutations_sync = 2"
-#     )
-#     wait_for(lambda: outdated_parts("t_zc") == "0")
-#     assert proj_query("t_zc", extra_settings="force_optimize_projection = 1") == baseline
-#     assert check_table("t_zc") == "1"
+# The scenario needs two replicas: on the mutating replica the shared blobs are
+# protected by the local metadata hardlink ref-counts, so the keep-list only
+# decides the fate of the blobs on a replica that zero-copy-fetched the mutated
+# part (fresh metadata, ref-count 0) and is the last one to unlock the old part.
+# node1 executes the mutation (node2's queues are stopped), node2 fetches the
+# mutated part, node1 drops the table (releasing its locks), and node2's delayed
+# old-part cleanup then decides whether the shared projection blobs survive.
+# The mutation must not touch projection columns, otherwise the projection is
+# rebuilt instead of hardlinked.
+def test_zero_copy_mutation_preserves_flat_projection():
+    for n, replica in ((node, "1"), (node2, "2")):
+        n.query("DROP TABLE IF EXISTS t_zc SYNC")
+        n.query(
+            f"""CREATE TABLE t_zc (key UInt64, id UInt64, value String,
+                PROJECTION p (SELECT key, id ORDER BY id))
+                ENGINE = ReplicatedMergeTree('/clickhouse/tables/t_zc', '{replica}')
+                ORDER BY key
+                SETTINGS min_bytes_for_wide_part = 0, projection_storage_format = 'flat',
+                    storage_policy = 's3', allow_remote_fs_zero_copy_replication = 1,
+                    old_parts_lifetime = 20, cleanup_delay_period = 1, max_cleanup_delay_period = 3"""
+        )
+    node.query(
+        "INSERT INTO t_zc SELECT number, number * 2, toString(number) FROM numbers(1000)"
+    )
+    node2.query("SYSTEM SYNC REPLICA t_zc")
+    baseline = proj_query("t_zc")
+    assert proj_query("t_zc", node2) == baseline
+    p2 = part_dir("t_zc", node2)
+    assert path_exists(f"{p2}.p.proj", node2)
+    # make node1 execute the mutation and node2 zero-copy-fetch its result
+    node2.query("SYSTEM STOP REPLICATION QUEUES t_zc")
+    node.query(
+        "ALTER TABLE t_zc UPDATE value = concat(value, 'x') WHERE 1 SETTINGS mutations_sync = 1"
+    )
+    node2.query("SYSTEM START REPLICATION QUEUES t_zc")
+    node2.query("SYSTEM SYNC REPLICA t_zc")
+    assert active_parts("t_zc", node2) == "1"
+    # release node1's zero-copy locks before node2 removes the old part, so
+    # node2's removal is the one that decides the fate of the shared blobs
+    node.query("DROP TABLE t_zc SYNC")
+    wait_for(lambda: outdated_parts("t_zc", node2) == "0")
+    assert outdated_parts("t_zc", node2) == "0"
+    assert broken_projection_parts("t_zc", node2) == "0"
+    assert (
+        proj_query("t_zc", node2, extra_settings="force_optimize_projection = 1")
+        == baseline
+    )
+    assert check_table("t_zc", node2) == "1"

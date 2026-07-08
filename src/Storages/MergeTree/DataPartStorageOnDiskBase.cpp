@@ -407,10 +407,11 @@ void DataPartStorageOnDiskBase::backup(
     BackupEntries & backup_entries,
     TemporaryFilesOnDisks * temp_dirs,
     bool is_projection_part,
-    bool allow_backup_broken_projection) const
+    bool allow_backup_broken_projection,
+    const String & part_dir_in_backup) const
 {
     fs::path part_path_on_disk = fs::path{root_path} / part_dir;
-    fs::path part_path_in_backup = fs::path{path_in_backup} / part_dir;
+    fs::path part_path_in_backup = fs::path{path_in_backup} / (part_dir_in_backup.empty() ? part_dir : part_dir_in_backup);
 
     auto disk = volume->getDisk();
 

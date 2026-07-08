@@ -81,7 +81,7 @@ IDataPartStorage::ProjectionStorageFormat DataPartStorageOnDiskFull::detectProje
     return ProjectionStorageFormat::NONE;
 }
 
-bool DataPartStorageOnDiskFull::hasProjection(const std::string & name)
+bool DataPartStorageOnDiskFull::hasProjection(const std::string & name) const
 {
     return detectProjectionAndItsFormat(name) != ProjectionStorageFormat::NONE;
 }

@@ -16,7 +16,7 @@ public:
 
     MergeTreeDataPartStorageType getType() const override { return MergeTreeDataPartStorageType::Full; }
 
-    bool hasProjection(const std::string & name) override;
+    bool hasProjection(const std::string & name) const override;
     /// Defaults live on the base virtual; overrides omit them (clang-tidy google-default-arguments).
     MutableDataPartStoragePtr getProjection(
         const std::string & name,
