@@ -253,6 +253,9 @@ Min bytes required for local read (file) to do seek, instead of read with ignore
     DECLARE(Bool, input_format_parquet_enable_row_group_prefetch, true, R"(
 Enable row group prefetching during parquet parsing. Currently, only single-threaded parsing can prefetch.
 )", 0) \
+    DECLARE(UInt64, input_format_parquet_prefetch_row_subgroups, 2, R"(
+Number of upcoming row subgroups whose column data is prefetched from storage while the current subgroup is being decoded (native Parquet reader v3). This overlaps object-storage reads with decoding, so read concurrency is no longer bounded by the number of processing threads - important for high-latency object storage. Higher values raise read concurrency at the cost of memory (bounded by the memory watermark). 0 keeps only the current subgroup prefetched (the previous behaviour).
+)", 0) \
     DECLARE(Bool, input_format_arrow_allow_missing_columns, true, R"(
 Allow missing columns while reading Arrow input formats
 )", 0) \

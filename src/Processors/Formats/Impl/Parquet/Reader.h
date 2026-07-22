@@ -529,6 +529,16 @@ struct Reader
     /// May assign dictionary_page_prefetch.
     void determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out);
 
+    /// Read-ahead variant of determinePagesToPrefetch for a FUTURE (not-yet-current) subgroup.
+    /// Collects the data-page prefetch handles that `row_subgroup` overlaps and appends them to
+    /// `out`, so their reads can be started early. Unlike determinePagesToPrefetch, this must be
+    /// safe to call out of order: it does NOT advance data_pages_prefetch_idx, does NOT reset any
+    /// page handle, and does NOT call splitRange - so it requires that determinePagesToPrefetch has
+    /// already built column.data_pages for an earlier subgroup. It also skips the PREWHERE-mask
+    /// refinement (the look-ahead subgroup's filter may not be computed yet); over-prefetching is
+    /// harmless, whereas skipping a needed page would not be.
+    void collectLookaheadPagesToPrefetch(ColumnChunk & column, const RowSubgroup & row_subgroup, std::vector<PrefetchHandle *> & out) const;
+
     /// Guess how much memory ColumnSubchunk::{column, arrays_offsets} will use, per row.
     double estimateColumnMemoryBytesPerRow(const ColumnChunk & column, const RowGroup & row_group, const PrimitiveColumnInfo & column_info) const;
 

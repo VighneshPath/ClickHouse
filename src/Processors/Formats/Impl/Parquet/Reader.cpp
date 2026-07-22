@@ -1277,6 +1277,37 @@ void Reader::determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & 
     }
 }
 
+void Reader::collectLookaheadPagesToPrefetch(ColumnChunk & column, const RowSubgroup & row_subgroup, std::vector<PrefetchHandle *> & out) const
+{
+    /// Read-only look-ahead: pick the data pages this future subgroup overlaps and feed them to
+    /// startPrefetch, so their object-storage reads begin while earlier subgroups are still being
+    /// decoded. This must not mutate the sequential per-subgroup state (see the header comment):
+    /// no advancing of data_pages_prefetch_idx, no resetting of page.prefetch, no splitRange.
+    if (row_subgroup.filter.rows_pass == 0)
+        return; // subgroup fully eliminated by the column index, nothing to read
+    if (column.data_pages.empty())
+        return; // no offset index (the whole-chunk handle is already warm), or setup not done yet
+
+    size_t subgroup_end = row_subgroup.start_row_idx + row_subgroup.filter.rows_total;
+
+    /// Scan from the current sequential cursor: pages before it are already consumed/reset and
+    /// belong to earlier subgroups; pages at/after it that overlap [start_row_idx, subgroup_end)
+    /// are the ones this subgroup will need. We intentionally do not consult filter.filter here
+    /// (it may not exist yet for a look-ahead subgroup), so this can over-select pages, never
+    /// under-select. startPrefetch is idempotent, so re-selecting a boundary page is harmless.
+    for (size_t i = column.data_pages_prefetch_idx; i < column.data_pages.size(); ++i)
+    {
+        auto & page = column.data_pages[i];
+        size_t page_start = size_t(page.meta->first_row_index);
+        if (page_start >= subgroup_end)
+            break;
+        size_t start_row_idx = std::max(page_start, row_subgroup.start_row_idx);
+        size_t end_row_idx = std::min(page.end_row_idx, subgroup_end);
+        if (end_row_idx > start_row_idx && page.prefetch)
+            out.push_back(&page.prefetch);
+    }
+}
+
 double Reader::estimateAverageStringLengthPerRow(const ColumnChunk & column, const RowGroup & row_group) const
 {
     double column_chunk_bytes = 0;

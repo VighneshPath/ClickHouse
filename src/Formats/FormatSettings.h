@@ -363,6 +363,7 @@ struct FormatSettings
         bool enable_json_parsing = true;
         bool preserve_order = false;
         bool enable_row_group_prefetch = true;
+        size_t prefetch_row_subgroups = 2;
         bool verify_checksums = true;
         bool local_time_as_utc = true;
         std::unordered_set<int> skip_row_groups = {};

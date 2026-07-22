@@ -761,6 +761,31 @@ void ReadManager::scheduleTask(Task task, bool is_first_in_group, MemoryUsageDif
 
     reader.prefetcher.startPrefetch(prefetches, &diff);
 
+    /// Read-ahead: also start prefetching this column's pages for the next few subgroups, so their
+    /// object-storage reads overlap with decoding of the current subgroup instead of only starting
+    /// once the sequential per-subgroup cursor reaches them. This is what lets read concurrency
+    /// exceed the number of processing threads on high-latency object storage. It only pre-warms
+    /// the Prefetcher (startPrefetch is idempotent and memory-tracked); it does not create decode
+    /// tasks or touch the lockless per-<row group, stage> scheduling state.
+    if (task.stage == ReadStage::ColumnData && task.column_idx != UINT64_MAX)
+    {
+        size_t lookahead = reader.options.format.parquet.prefetch_row_subgroups;
+        if (lookahead > 0)
+        {
+            ColumnChunk & column = row_group.columns.at(task.column_idx);
+            std::vector<PrefetchHandle *> lookahead_prefetches;
+            for (size_t k = 1; k <= lookahead; ++k)
+            {
+                size_t next_idx = task.row_subgroup_idx + k;
+                if (next_idx >= row_group.subgroups.size())
+                    break;
+                reader.collectLookaheadPagesToPrefetch(column, row_group.subgroups[next_idx], lookahead_prefetches);
+            }
+            if (!lookahead_prefetches.empty())
+                reader.prefetcher.startPrefetch(lookahead_prefetches, &diff);
+        }
+    }
+
     /// We want to detect tiny tasks to group them together to reduce scheduling overhead.
     /// Use the predicted memory usage as a rough estimate of how long a task will take.
     /// E.g. main data read task's memory estimate consists of the input page sizes and the output
