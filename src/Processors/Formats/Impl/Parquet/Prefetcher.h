@@ -3,6 +3,7 @@
 #include <Common/PODArray.h>
 #include <Processors/Formats/Impl/Parquet/ReadCommon.h>
 
+#include <functional>
 #include <optional>
 #include <span>
 
@@ -42,9 +43,12 @@ public:
     void finalizeRanges();
 
     /// Replace a requested range with a set of disjoint smaller ranges contained within it.
-    /// `subranges` must be sorted.
+    /// `subranges` must be sorted. `diff` is used to reconcile the consumed `request`'s memory token
+    /// (if any) - the read-ahead pump may have started `request` and given it a memory token, so it
+    /// must be released through `diff` rather than dropped, or per-stage memory accounting leaks.
     std::vector<PrefetchHandle> splitRange(
-        PrefetchHandle request, const std::vector<std::pair</*global_offset*/ size_t, /*length*/ size_t>> & subranges, bool likely_to_be_used);
+        PrefetchHandle request, const std::vector<std::pair</*global_offset*/ size_t, /*length*/ size_t>> & subranges, bool likely_to_be_used,
+        MemoryUsageDiff * diff = nullptr);
 
     /// Kicks off background tasks to prefetch these range, if needed (if not already started, and
     /// prefetching is enabled, and handle is valid).
@@ -62,6 +66,18 @@ public:
     void readSync(char * to, size_t n, size_t offset);
 
     size_t getFileSize() const { return file_size; }
+
+    /// Number of read Tasks currently submitted-but-not-completed (scheduled or running), and their
+    /// total byte size. Used by ReadManager's read-ahead pump to keep the io_runner saturated up to
+    /// an independent IO budget, decoupled from decode/max_threads.
+    size_t readsInFlight() const { return reads_in_flight.load(std::memory_order_relaxed); }
+    size_t bytesInFlight() const { return bytes_in_flight.load(std::memory_order_relaxed); }
+
+    /// Invoked (on the thread that finished a read - an io_runner thread, or a decode thread doing an
+    /// inline read) right after each read completes, so the ReadManager's read-ahead pump can refill
+    /// the io_runner the instant a slot frees up, keeping it saturated through decode gaps. Set once
+    /// before reads begin; the callback must itself be safe against ReadManager teardown.
+    void setReadCompletedCallback(std::function<void()> cb) { read_completed_callback = std::move(cb); }
 
 private:
     friend class PrefetchHandle;
@@ -122,6 +138,10 @@ private:
             /// Task may still be running; in this case, the runner will deallocate `buf` when done.
             Deallocated,
         };
+
+        /// Back-pointer to the owning Prefetcher, so the static decreaseTaskRefcount can adjust the
+        /// in-flight counters when it cancels a not-yet-run Task.
+        Prefetcher * owner = nullptr;
 
         size_t offset{};
         size_t length{};
@@ -190,6 +210,15 @@ private:
     std::deque<RangeSet> range_sets;
 
     std::atomic<bool> ranges_finalized {false};
+
+    /// Read Tasks submitted (scheduleTask) but not yet completed/cancelled, and their total bytes.
+    /// Incremented in scheduleTask; decremented when a Task reaches a terminal state (runTask
+    /// finishing the read, or decreaseTaskRefcount cancelling a not-yet-run Task).
+    std::atomic<size_t> reads_in_flight {0};
+    std::atomic<size_t> bytes_in_flight {0};
+
+    /// Called after each read completes; see setReadCompletedCallback. Set once before reads begin.
+    std::function<void()> read_completed_callback;
 
     /// (One mutex for all tasks because it's not used frequently.)
     std::mutex exception_mutex;

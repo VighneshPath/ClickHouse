@@ -527,7 +527,7 @@ struct Reader
     /// Call after prewhere is done on row subgroup. Un-requests prefetch for fully filtered out pages,
     /// adds pages that need prefetch to `out`. Must be called in order.
     /// May assign dictionary_page_prefetch.
-    void determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out);
+    void determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out, MemoryUsageDiff & diff);
 
     /// Read-ahead variant of determinePagesToPrefetch for a FUTURE (not-yet-current) subgroup.
     /// Collects the data-page prefetch handles that `row_subgroup` overlaps and appends them to

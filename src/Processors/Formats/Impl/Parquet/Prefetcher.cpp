@@ -185,12 +185,16 @@ void Prefetcher::startPrefetch(const std::vector<PrefetchHandle *> & requests_to
 }
 
 std::vector<PrefetchHandle> Prefetcher::splitRange(
-    PrefetchHandle request, const std::vector<std::pair</*global_offset*/ size_t, /*length*/ size_t>> & subranges, bool likely_to_be_used)
+    PrefetchHandle request, const std::vector<std::pair</*global_offset*/ size_t, /*length*/ size_t>> & subranges, bool likely_to_be_used,
+    MemoryUsageDiff * diff)
 {
     chassert(ranges_finalized.load(std::memory_order_relaxed));
     chassert(std::is_sorted(subranges.begin(), subranges.end()));
     chassert(!subranges.empty());
-    chassert(!request.memory); // prefetch not requested
+    /// `request` MAY carry a memory token: the read-ahead pump can start the coarse whole-chunk
+    /// handle before it is split. Its token is released through `diff` by the reset(&diff) below
+    /// (when HasTask, the sub-handles reuse the same in-flight Task, so the coarse read is reused,
+    /// not wasted); the per-page sub-handles get their own tokens later in the normal flow.
 
     RequestState * parent_req = request.request;
     std::vector<PrefetchHandle> out_handles;
@@ -251,7 +255,7 @@ std::vector<PrefetchHandle> Prefetcher::splitRange(
                     r.request = req;
                 }
 
-                request.reset(/*diff=*/ nullptr);
+                request.reset(diff);
                 return out_handles;
             }
         }
@@ -270,7 +274,7 @@ std::vector<PrefetchHandle> Prefetcher::splitRange(
         req->task_offset = subranges[i].first - task->offset;
     }
 
-    request.reset(/*diff=*/ nullptr);
+    request.reset(diff);
     return out_handles;
 }
 
@@ -370,6 +374,7 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
 
     /// Create task.
     Task & task = tasks.emplace_back();
+    task.owner = this;
     task.offset = start_offset;
     task.length = end_offset - task.offset;
     task.memory_amplification = 1. * static_cast<double>(task.length) / static_cast<double>(total_length_of_covered_ranges);
@@ -406,15 +411,30 @@ void Prefetcher::decreaseTaskRefcount(Task * task, size_t amount)
     if (c != amount)
         return;
 
-    if (task->state.exchange(Task::State::Deallocated) != Task::State::Running)
+    Task::State prev = task->state.exchange(Task::State::Deallocated);
+    if (prev != Task::State::Running)
     {
         task->buf = {};
         task->cached_region.reset();
+    }
+    /// If the Task was still Scheduled (never ran), runTask will fail its Scheduled->Running CAS and
+    /// return without decrementing, so we must balance scheduleTask's increment here. If it was
+    /// Running, runTask still finishes and decrements; if Done/Exception it already did.
+    if (prev == Task::State::Scheduled && task->owner)
+    {
+        task->owner->reads_in_flight.fetch_sub(1, std::memory_order_relaxed);
+        task->owner->bytes_in_flight.fetch_sub(task->length, std::memory_order_relaxed);
     }
 }
 
 void Prefetcher::scheduleTask(Task * task)
 {
+    /// Count this Task as in-flight for the whole time until it completes/cancels, regardless of
+    /// whether the io_runner picks it up or it is read inline via getRangeData - both go through
+    /// runTask exactly once (or are cancelled via decreaseTaskRefcount), which does the decrement.
+    reads_in_flight.fetch_add(1, std::memory_order_relaxed);
+    bytes_in_flight.fetch_add(task->length, std::memory_order_relaxed);
+
     if (parser_shared_resources && !parser_shared_resources->io_runner.isDisabled())
         parser_shared_resources->io_runner([this, task, _shutdown = shutdown]
             {
@@ -542,7 +562,18 @@ Prefetcher::Task::State Prefetcher::runTask(Task * task)
         task->cached_region.reset();
     }
 
+    /// This Task's read is done (reached only on the path that won the Scheduled->Running CAS above,
+    /// i.e. the thread that actually performed the read). Balances the increment in scheduleTask.
+    reads_in_flight.fetch_sub(1, std::memory_order_relaxed);
+    bytes_in_flight.fetch_sub(task->length, std::memory_order_relaxed);
+
     task->completion.notify();
+
+    /// A read slot just freed up - let the read-ahead pump refill the io_runner immediately, instead
+    /// of waiting for the next read() call (which would let the pipe drain during decode). The
+    /// callback is teardown-safe (guards on the ReadManager's shutdown lock).
+    if (read_completed_callback)
+        read_completed_callback();
 
     return s;
 }

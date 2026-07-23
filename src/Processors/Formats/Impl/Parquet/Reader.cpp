@@ -1200,7 +1200,7 @@ void Reader::decodeOffsetIndex(ColumnChunk & column, const RowGroup & row_group)
     }
 }
 
-void Reader::determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out)
+void Reader::determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out, MemoryUsageDiff & diff)
 {
     chassert(row_subgroup.filter.rows_pass > 0);
     if (column.offset_index.page_locations.empty())
@@ -1245,7 +1245,7 @@ void Reader::determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & 
         }
         chassert(!page_byte_ranges.empty());
 
-        auto handles = prefetcher.splitRange(std::move(column.data_pages_prefetch), page_byte_ranges, /*likely_to_be_used*/ false);
+        auto handles = prefetcher.splitRange(std::move(column.data_pages_prefetch), page_byte_ranges, /*likely_to_be_used*/ false, &diff);
 
         if (has_undeclared_dictionary_page)
             column.dictionary_page_prefetch = std::move(handles.at(0));

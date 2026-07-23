@@ -27,6 +27,8 @@ namespace ProfileEvents
     extern const Event ParquetDecodingTaskBatches;
     extern const Event ParquetReadRowGroups;
     extern const Event ParquetPrunedRowGroups;
+    extern const Event ParquetReadAheadPrefetchedRanges;
+    extern const Event ParquetReadAheadPumpRuns;
 }
 
 namespace DB::Parquet
@@ -66,6 +68,31 @@ void ReadManager::init(FormatParserSharedResourcesPtr parser_shared_resources_, 
 
     ProfileEvents::increment(ProfileEvents::ParquetReadRowGroups, reader.row_groups.size());
     ProfileEvents::increment(ProfileEvents::ParquetPrunedRowGroups, reader.file_metadata.row_groups.size() - reader.row_groups.size());
+
+    /// Read-ahead pump budget. Gated by the setting; sized by max_download_threads (via
+    /// getIOThreadsPerReader), so read concurrency scales with the IO pool, not with max_threads.
+    if (reader.options.format.parquet.prefetch_row_subgroups > 0 && parser_shared_resources->max_io_threads > 0)
+    {
+        io_budget = std::max<size_t>(1, parser_shared_resources->getIOThreadsPerReader());
+        io_bytes_budget = std::max<size_t>(reader.options.format.parquet.memory_high_watermark / 2, 1ul << 20);
+
+        /// Re-arm the pump the instant a read completes (on an io_runner thread), so the io_runner
+        /// stays saturated through decode gaps rather than only refilling once per read() call.
+        /// try_to_lock on our shutdown: if the ReadManager is being destroyed it bails without
+        /// touching `this`; while it holds the shared lock, ~ReadManager (which takes it exclusively)
+        /// waits, so `this` stays alive. Never blocks -> no deadlock against teardown.
+        reader.prefetcher.setReadCompletedCallback([this, sd = shutdown]()
+        {
+            std::shared_lock lock(*sd, std::try_to_lock);
+            if (lock.owns_lock())
+                pumpReadAhead();
+        });
+
+        LOG_WARNING(getLogger("ParquetReadManager"),
+            "read-ahead pump: io_budget={} io_threads_per_reader={} max_io_threads={} io_runner_disabled={} row_groups={}",
+            io_budget, parser_shared_resources->getIOThreadsPerReader(), parser_shared_resources->max_io_threads,
+            parser_shared_resources->io_runner.isDisabled(), reader.row_groups.size());
+    }
 
     size_t num_row_groups = reader.row_groups.size();
     for (size_t i = size_t(ReadStage::NotStarted) + 1; i < size_t(ReadStage::Deliver); ++i)
@@ -554,6 +581,57 @@ void ReadManager::flushMemoryUsageDiff(MemoryUsageDiff && diff)
     }
 }
 
+void ReadManager::pumpReadAhead()
+{
+    if (io_budget == 0)
+        return;
+
+    /// Single owner: only one thread at a time advances the read-ahead cursor and starts the coarse
+    /// handles, so a given handle is started by exactly one thread (avoids a data race on the
+    /// handle's memory token in startPrefetch).
+    if (io_pump_running.test_and_set(std::memory_order_acquire))
+        return;
+
+    MemoryUsageDiff diff(ReadStage::ColumnData);
+    const size_t num_rgs = reader.row_groups.size();
+
+    /// Keep the shared io_runner filled up to the IO budget by prefetching the coarse whole-column-
+    /// chunk handles of upcoming row groups (distinct byte ranges, so each is a genuinely new read).
+    /// startPrefetch is idempotent and, once a row group is actually decoded, splitRange reuses the
+    /// in-flight Task for the per-page handles (no double read). This is decoupled from decode: the
+    /// number of in-flight reads is bounded by io_budget (∝ max_download_threads), not max_threads.
+    while (reader.prefetcher.readsInFlight() < io_budget
+           && reader.prefetcher.bytesInFlight() < io_bytes_budget)
+    {
+        /// Start one past the actively-decoded row group: the current one's reads are issued by the
+        /// normal decode path, and skipping it keeps the pump clear of the row group whose
+        /// data_pages/data_pages_prefetch a scheduling thread may be mutating right now.
+        size_t rg = std::max(read_ahead_rg_cursor.load(std::memory_order_relaxed),
+                             first_incomplete_row_group.load(std::memory_order_relaxed) + 1);
+        if (rg >= num_rgs)
+            break;
+
+        std::vector<PrefetchHandle *> handles;
+        for (auto & col : reader.row_groups[rg].columns)
+        {
+            /// Only the coarse handle, and only while unsplit (data_pages still empty) and valid.
+            if (col.data_pages.empty() && col.data_pages_prefetch)
+                handles.push_back(&col.data_pages_prefetch);
+        }
+        if (!handles.empty())
+        {
+            reader.prefetcher.startPrefetch(handles, &diff);
+            ProfileEvents::increment(ProfileEvents::ParquetReadAheadPrefetchedRanges, handles.size());
+            ProfileEvents::increment(ProfileEvents::ParquetReadAheadPumpRuns);
+        }
+
+        read_ahead_rg_cursor.store(rg + 1, std::memory_order_relaxed);
+    }
+
+    flushMemoryUsageDiff(std::move(diff));
+    io_pump_running.clear(std::memory_order_release);
+}
+
 void ReadManager::scheduleTasksIfNeeded(ReadStage stage_idx)
 {
     chassert(stage_idx < ReadStage::Deliver);
@@ -721,7 +799,7 @@ void ReadManager::scheduleTask(Task task, bool is_first_in_group, MemoryUsageDif
                 ColumnSubchunk & subchunk = row_subgroup.columns.at(task.column_idx);
                 if (row_subgroup.filter.rows_pass == 0)
                     break;
-                reader.determinePagesToPrefetch(column, row_subgroup, row_group, prefetches);
+                reader.determinePagesToPrefetch(column, row_subgroup, row_group, prefetches, diff);
 
                 /// Side note: would be nice to avoid reading the dictionary if all dictionary-encoded
                 /// pages were filtered out (e.g. if it's a 100 MB column chunk with unique long strings,
@@ -761,30 +839,8 @@ void ReadManager::scheduleTask(Task task, bool is_first_in_group, MemoryUsageDif
 
     reader.prefetcher.startPrefetch(prefetches, &diff);
 
-    /// Read-ahead: also start prefetching this column's pages for the next few subgroups, so their
-    /// object-storage reads overlap with decoding of the current subgroup instead of only starting
-    /// once the sequential per-subgroup cursor reaches them. This is what lets read concurrency
-    /// exceed the number of processing threads on high-latency object storage. It only pre-warms
-    /// the Prefetcher (startPrefetch is idempotent and memory-tracked); it does not create decode
-    /// tasks or touch the lockless per-<row group, stage> scheduling state.
-    if (task.stage == ReadStage::ColumnData && task.column_idx != UINT64_MAX)
-    {
-        size_t lookahead = reader.options.format.parquet.prefetch_row_subgroups;
-        if (lookahead > 0)
-        {
-            ColumnChunk & column = row_group.columns.at(task.column_idx);
-            std::vector<PrefetchHandle *> lookahead_prefetches;
-            for (size_t k = 1; k <= lookahead; ++k)
-            {
-                size_t next_idx = task.row_subgroup_idx + k;
-                if (next_idx >= row_group.subgroups.size())
-                    break;
-                reader.collectLookaheadPagesToPrefetch(column, row_group.subgroups[next_idx], lookahead_prefetches);
-            }
-            if (!lookahead_prefetches.empty())
-                reader.prefetcher.startPrefetch(lookahead_prefetches, &diff);
-        }
-    }
+    /// (Cross-row-group read-ahead is now driven by pumpReadAhead, re-armed from read(), rather than
+    /// as a side effect of decode-task scheduling here.)
 
     /// We want to detect tiny tasks to group them together to reduce scheduling overhead.
     /// Use the predicted memory usage as a rough estimate of how long a task will take.
@@ -1021,6 +1077,11 @@ std::string ReadManager::collectDeadlockDiagnostics()
 
 ReadManager::ReadResult ReadManager::read()
 {
+    /// Re-arm the read-ahead pump: refill in-flight S3 reads up to the IO budget as earlier ones
+    /// complete. Called here (once per delivered chunk) rather than from a completion callback to
+    /// avoid running scheduling on io_runner threads; read() is the single-consumer entry point.
+    pumpReadAhead();
+
     Task task;
     {
         std::unique_lock lock(delivery_mutex);

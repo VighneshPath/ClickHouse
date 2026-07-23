@@ -107,6 +107,14 @@ private:
     /// First row group that hasn't reached Deallocated stage.
     std::atomic<size_t> first_incomplete_row_group {0};
 
+    /// Read-ahead pump: keep the shared io_runner saturated with up to `io_budget` in-flight reads
+    /// (and at most `io_bytes_budget` bytes), decoupled from decode/max_threads, by prefetching the
+    /// coarse whole-column-chunk handles of upcoming row groups. See pumpReadAhead.
+    size_t io_budget = 0;
+    size_t io_bytes_budget = 0;
+    std::atomic<size_t> read_ahead_rg_cursor {0};
+    std::atomic_flag io_pump_running = ATOMIC_FLAG_INIT;
+
     std::mutex delivery_mutex;
     std::priority_queue<Task, std::vector<Task>, Task::Comparator> delivery_queue;
     std::condition_variable delivery_cv;
@@ -127,6 +135,10 @@ private:
     void setTasksToSchedule(size_t row_group_idx, ReadStage stage, std::vector<Task> add_tasks, MemoryUsageDiff & diff);
     void addTasksToReadColumns(size_t row_group_idx, size_t row_subgroup_idx, ReadStage stage, size_t step_idx, MemoryUsageDiff & diff);
     void advanceDeliveryPtrIfNeeded(size_t row_group_idx, MemoryUsageDiff & diff);
+    /// Start prefetching upcoming row groups' coarse column data until the io_runner holds `io_budget`
+    /// in-flight reads (or `io_bytes_budget` bytes). Re-armed on each read() so it keeps refilling as
+    /// reads complete. Single-owner via io_pump_running.
+    void pumpReadAhead();
     void flushMemoryUsageDiff(MemoryUsageDiff && diff);
     std::string collectDeadlockDiagnostics();
 };
