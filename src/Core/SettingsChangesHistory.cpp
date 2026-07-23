@@ -42,6 +42,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
         addSettingsChanges(settings_changes_history, "26.7",
         {
             {"input_format_parquet_prefetch_row_subgroups", 2, 2, "New setting to prefetch upcoming row subgroups' column data in the native Parquet reader v3, decoupling object-storage read concurrency from the number of processing threads."},
+            {"object_storage_max_files_to_prefetch", 1, 1, "New setting to prime upcoming files' reads ahead of the file currently being consumed by an object storage reading stream, decoupling file-level read concurrency from the number of processing threads."},
             {"analyzer_compatibility_allow_non_aggregate_in_having", false, false, "New compatibility setting. When enabled, the analyzer mimics the legacy `HAVING`-to-`WHERE` rewrite for non-aggregate AND-conjuncts instead of raising `NOT_AN_AGGREGATE`."},
             {"dictionary_lazy_load", "auto", "auto", "New setting overriding the server setting `dictionaries_lazy_load` for an individual dictionary."},
             {"discard_query_data", false, false, "New setting to skip sending query result rows to the client over the native TCP protocol."},

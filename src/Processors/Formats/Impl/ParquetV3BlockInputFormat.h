@@ -63,6 +63,8 @@ public:
 
     std::optional<std::pair<std::vector<size_t>, size_t>> getMatchedBuckets() const override;
 
+    void prefetch() override;
+
 private:
     Chunk read() override;
 
