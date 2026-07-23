@@ -87,11 +87,6 @@ void ReadManager::init(FormatParserSharedResourcesPtr parser_shared_resources_, 
             if (lock.owns_lock())
                 pumpReadAhead();
         });
-
-        LOG_WARNING(getLogger("ParquetReadManager"),
-            "read-ahead pump: io_budget={} io_threads_per_reader={} max_io_threads={} io_runner_disabled={} row_groups={}",
-            io_budget, parser_shared_resources->getIOThreadsPerReader(), parser_shared_resources->max_io_threads,
-            parser_shared_resources->io_runner.isDisabled(), reader.row_groups.size());
     }
 
     size_t num_row_groups = reader.row_groups.size();
