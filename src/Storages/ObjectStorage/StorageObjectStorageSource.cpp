@@ -199,6 +199,7 @@ namespace Setting
     extern const SettingsUInt64 s3_path_filter_limit;
     extern const SettingsBool use_parquet_metadata_cache;
     extern const SettingsBool s3_validate_etag_on_read;
+    extern const SettingsUInt64 object_storage_max_files_to_prefetch;
 }
 
 static void logIcebergFileStats(const ObjectInfoPtr & object_info, const LoggerPtr & log)
@@ -250,10 +251,11 @@ StorageObjectStorageSource::StorageObjectStorageSource(
               CurrentMetrics::StorageObjectStorageThreads,
               CurrentMetrics::StorageObjectStorageThreadsActive,
               CurrentMetrics::StorageObjectStorageThreadsScheduled,
-              1 /* max_threads */))
+              std::max<size_t>(context_->getSettingsRef()[Setting::object_storage_max_files_to_prefetch], 1)))
     , file_iterator(file_iterator_)
     , schema_cache(StorageObjectStorage::getSchemaCache(context_, configuration->getTypeName()))
     , create_reader_scheduler(threadPoolCallbackRunnerUnsafe<ReaderHolder>(*create_reader_pool, ThreadName::READER_POOL))
+    , max_files_to_prefetch(std::max<size_t>(context_->getSettingsRef()[Setting::object_storage_max_files_to_prefetch], 1))
 {
 }
 
@@ -501,9 +503,21 @@ void StorageObjectStorageSource::lazyInitialize()
     if (reader)
     {
         ++total_files_read;
-        reader_future = createReaderAsync();
+        refillReaderFutures();
     }
     initialized = true;
+}
+
+void StorageObjectStorageSource::refillReaderFutures()
+{
+    while (reader_futures.size() < max_files_to_prefetch)
+    {
+        /// The first queued future preserves the pre-existing pipeline-object-only lookahead
+        /// (unprimed), so max_files_to_prefetch=1 never primes anything - identical to the
+        /// behaviour before this setting existed. Every subsequent slot is primed.
+        const bool prime = !reader_futures.empty();
+        reader_futures.push_back(createReaderAsync(prime));
+    }
 }
 
 void StorageObjectStorageSource::onFinish()
@@ -750,18 +764,25 @@ Chunk StorageObjectStorageSource::generate()
 
         total_rows_in_file = 0;
 
-        chassert(reader_future.valid());
-        reader = reader_future.get();
+        chassert(!reader_futures.empty());
+        reader = reader_futures.front().get();
+        reader_futures.pop_front();
 
         if (!reader)
             break;
 
         ++total_files_read;
 
-        /// Even if task is finished the thread may be not freed in pool.
-        /// So wait until it will be freed before scheduling a new task.
-        create_reader_pool->wait();
-        reader_future = createReaderAsync();
+        if (max_files_to_prefetch <= 1)
+        {
+            /// Even if task is finished the thread may be not freed in pool.
+            /// So wait until it will be freed before scheduling a new task.
+            create_reader_pool->wait();
+        }
+        /// With max_files_to_prefetch > 1 the pool has multiple threads and multiple readers are
+        /// meant to be building/priming concurrently, so waiting for the whole pool here would
+        /// serialize exactly the concurrency this setting is meant to provide.
+        refillReaderFutures();
     }
 
     return {};
@@ -1287,9 +1308,18 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         object_info, std::move(read_buf), std::move(source), std::move(pipeline), std::move(current_reader));
 }
 
-std::future<StorageObjectStorageSource::ReaderHolder> StorageObjectStorageSource::createReaderAsync()
+std::future<StorageObjectStorageSource::ReaderHolder> StorageObjectStorageSource::createReaderAsync(bool prime)
 {
-    return create_reader_scheduler([=, this] { return createReader(); }, Priority{});
+    return create_reader_scheduler([=, this]
+    {
+        auto reader_holder = createReader();
+        if (prime && reader_holder)
+        {
+            if (auto * input_format = reader_holder.getInputFormat())
+                input_format->prefetch();
+        }
+        return reader_holder;
+    }, Priority{});
 }
 
 std::unique_ptr<ReadBufferFromFileBase> createReadBuffer(

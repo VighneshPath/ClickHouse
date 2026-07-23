@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <future>
 #include <optional>
 #include <Common/re2.h>
@@ -114,6 +115,9 @@ protected:
 
         ObjectInfoPtr getObjectInfo() const { return object_info; }
         const IInputFormat * getInputFormat() const { return dynamic_cast<const IInputFormat *>(source.get()); }
+        /// Non-const overload so a freshly-built, not-yet-current reader can be primed (see
+        /// StorageObjectStorageSource::createReaderAsync) without exposing mutable access more broadly.
+        IInputFormat * getInputFormat() { return dynamic_cast<IInputFormat *>(source.get()); }
         ReadBuffer * readBuffer() const { return read_buf.get(); }
 
     private:
@@ -126,7 +130,22 @@ protected:
 
     ReaderHolder reader;
     ThreadPoolCallbackRunnerUnsafe<ReaderHolder> create_reader_scheduler;
-    std::future<ReaderHolder> reader_future;
+
+    /// Depth of the file-lookahead queue below (>= 1; from `object_storage_max_files_to_prefetch`).
+    /// `reader` plus these futures together keep up to this many files' readers alive/priming at once.
+    const size_t max_files_to_prefetch;
+    /// Upcoming files' readers, in the same order the file_iterator handed them out. Built on
+    /// create_reader_pool and primed (createReaderAsync -> prefetch()) so their background reads are
+    /// already in flight by the time generate() reaches them; consumed strictly front-to-back, so
+    /// per-stream row order is unaffected by however many are queued.
+    std::deque<std::future<ReaderHolder>> reader_futures;
+
+    /// Fills reader_futures back up to max_files_to_prefetch entries. Only futures beyond the first
+    /// are primed (see createReaderAsync): the first preserves the pre-existing pipeline-object-only
+    /// lookahead, so max_files_to_prefetch=1 (the default) primes nothing and behaves exactly as
+    /// before this setting existed. No-op once file_iterator is exhausted (createReaderAsync's
+    /// result will resolve to an empty/false ReaderHolder, which callers already handle).
+    void refillReaderFutures();
 
     /// Recreate ReadBuffer and Pipeline for each file.
     static ReaderHolder createReader(
@@ -147,7 +166,9 @@ protected:
 
     ReaderHolder createReader();
 
-    std::future<ReaderHolder> createReaderAsync();
+    /// If `prime` is set, calls IInputFormat::prefetch() on the built reader (see FormatFactory
+    /// formats' prefetch() override) to start its background reads before it becomes `reader`.
+    std::future<ReaderHolder> createReaderAsync(bool prime);
 
     void addNumRowsToCache(const ObjectInfo & object_info, size_t num_rows);
     void lazyInitialize();
