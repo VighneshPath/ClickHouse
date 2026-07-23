@@ -63,6 +63,7 @@
 
 #include <fmt/ranges.h>
 #include <base/sleep.h>
+#include <Common/ElapsedTimeProfileEventIncrement.h>
 #include <Common/ProfileEvents.h>
 #include <Core/SettingsEnums.h>
 #include <Core/Field.h>
@@ -82,6 +83,7 @@ namespace ProfileEvents
     extern const Event ObjectStorageGlobFilteredObjects;
     extern const Event ObjectStoragePredicateFilteredObjects;
     extern const Event ObjectStorageReadObjects;
+    extern const Event ObjectStorageWaitPrefetchedReaderMicroseconds;
 }
 
 namespace CurrentMetrics
@@ -765,7 +767,10 @@ Chunk StorageObjectStorageSource::generate()
         total_rows_in_file = 0;
 
         chassert(!reader_futures.empty());
-        reader = reader_futures.front().get();
+        {
+            ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::ObjectStorageWaitPrefetchedReaderMicroseconds);
+            reader = reader_futures.front().get();
+        }
         reader_futures.pop_front();
 
         if (!reader)
@@ -1315,6 +1320,10 @@ std::future<StorageObjectStorageSource::ReaderHolder> StorageObjectStorageSource
         auto reader_holder = createReader();
         if (prime && reader_holder)
         {
+            fiu_do_on(FailPoints::object_storage_file_prefetch_failpoint,
+            {
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Failpoint for object storage file prefetch enabled");
+            });
             if (auto * input_format = reader_holder.getInputFormat())
                 input_format->prefetch();
         }
