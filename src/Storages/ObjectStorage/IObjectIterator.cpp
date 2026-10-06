@@ -158,7 +158,7 @@ ObjectInfoPtr ObjectIteratorSplitByBuckets::next(size_t id)
             {
                 auto matching_marks = query_condition_cache->read(
                     storage_id.uuid,
-                    last_object_info->getFileName(),
+                    last_object_info->getQueryConditionCacheKey(),
                     *format_filter_info->condition_hash);
                 if (matching_marks.has_value())
                 {
@@ -206,6 +206,12 @@ ObjectInfoPtr ObjectIteratorSplitByBuckets::next(size_t id)
 String ObjectInfo::getIdentifier() const
 {
     return getIdentifierForPath(getPath());
+}
+
+String ObjectInfo::getQueryConditionCacheKey() const
+{
+    /// The full path: a Hive-partitioned dataset repeats the same file name in every partition.
+    return getPath();
 }
 
 String ObjectInfo::getIdentifierForPath(const String & path) const

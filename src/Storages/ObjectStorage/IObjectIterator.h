@@ -59,6 +59,9 @@ struct ObjectInfo
 
     String getIdentifier() const;
     String getIdentifierForPath(const String & path) const;
+
+    /// What the query condition cache knows this object by, together with the table's UUID.
+    String getQueryConditionCacheKey() const;
 };
 
 using ObjectInfoPtr = std::shared_ptr<ObjectInfo>;

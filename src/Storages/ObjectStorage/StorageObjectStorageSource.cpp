@@ -682,7 +682,7 @@ Chunk StorageObjectStorageSource::generate()
                             auto query_condition_cache = Context::getGlobalContextInstance()->getQueryConditionCache();
                             query_condition_cache->write(
                                 storage_id.uuid,
-                                object_info->getFileName(),
+                                object_info->getQueryConditionCacheKey(),
                                 *format_filter_info->condition_hash,
                                 format_filter_info->filter_actions_dag->dumpNames(),
                                 unmatched_ranges,
@@ -827,7 +827,7 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         if (query_condition_cache && !object_info->file_bucket_info)
         {
             auto matching_marks = query_condition_cache->read(
-                storage_id.uuid, object_info->getFileName(), *format_filter_info->condition_hash);
+                storage_id.uuid, object_info->getQueryConditionCacheKey(), *format_filter_info->condition_hash);
             if (matching_marks.has_value())
             {
                 const auto & marks = *matching_marks;
