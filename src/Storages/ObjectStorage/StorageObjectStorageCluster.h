@@ -176,6 +176,8 @@ public:
     bool isIcebergStorage() const { return configuration->isIcebergConfiguration(); }
 
 private:
+    void prepareForWholeQueryDispatch(ContextPtr context) override;
+
     void updateQueryToSendIfNeeded(
         ASTPtr & query,
         const StorageSnapshotPtr & storage_snapshot,
