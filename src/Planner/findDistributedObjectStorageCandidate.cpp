@@ -3,19 +3,25 @@
 #include <Access/Common/RowPolicyDefs.h>
 #include <Access/ContextAccess.h>
 #include <Access/EnabledRowPolicies.h>
+#include <AggregateFunctions/AggregateFunctionFactory.h>
 #include <Analyzer/AggregationUtils.h>
+#include <Analyzer/FunctionNode.h>
 #include <Analyzer/IQueryTreeNode.h>
 #include <Analyzer/JoinNode.h>
 #include <Analyzer/QueryNode.h>
 #include <Analyzer/TableFunctionNode.h>
 #include <Analyzer/TableNode.h>
+#include <Analyzer/UnionNode.h>
 #include <Analyzer/WindowFunctionsUtils.h>
 #include <Core/Settings.h>
 #include <Core/SettingsEnums.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/SelectQueryOptions.h>
+#include <Planner/Utils.h>
 #include <Storages/IStorageCluster.h>
+
+#include <unordered_set>
 
 namespace DB
 {
@@ -79,7 +85,8 @@ bool hasAggregateOrWindowFunctionNodes(const QueryTreeNodePtr & node)
 }
 
 /// Driver subqueries run on separate partitions, so they must not finalize partial results.
-/// Partner subqueries are exempt because each worker reads them in full.
+/// Other subqueries can finalize, because each worker reads their tables in full. But each worker computes them
+/// on its own, so they must give the same result on every worker: see `canDifferBetweenWorkers`.
 bool isSafeIntermediateSubquery(const QueryNode & query_node)
 {
     return !query_node.isDistinct() && !query_node.hasGroupBy() && !query_node.hasHaving() && !query_node.hasWindow()
@@ -91,6 +98,9 @@ bool isSafeIntermediateSubquery(const QueryNode & query_node)
 struct DriverPathResult
 {
     std::shared_ptr<TableNode> driver;
+
+    /// The subqueries between the dispatch boundary and the driver.
+    std::unordered_set<const IQueryTreeNode *> path_subqueries;
 
     /// Single-table reads already use `IStorageCluster::read`.
     bool has_join = false;
@@ -104,7 +114,7 @@ std::optional<DriverPathResult> findDriverOnLeftSpine(const QueryTreeNodePtr & n
         if (!isEligibleDriver(*table_node, context))
             return {};
 
-        return DriverPathResult{.driver = std::static_pointer_cast<TableNode>(node)};
+        return DriverPathResult{.driver = std::static_pointer_cast<TableNode>(node), .path_subqueries = {}};
     }
 
     if (const auto * query_node = node->as<QueryNode>())
@@ -113,7 +123,10 @@ std::optional<DriverPathResult> findDriverOnLeftSpine(const QueryTreeNodePtr & n
         if (!join_tree || !isSafeIntermediateSubquery(*query_node))
             return {};
 
-        return findDriverOnLeftSpine(join_tree, context);
+        auto result = findDriverOnLeftSpine(join_tree, context);
+        if (result)
+            result->path_subqueries.insert(query_node);
+        return result;
     }
 
     if (const auto * join_node = node->as<JoinNode>())
@@ -150,6 +163,69 @@ bool allWorkerLocalTableReferencesAreSafe(const QueryTreeNodePtr & node, const T
 
     for (const auto & child : node->getChildren())
         if (!allWorkerLocalTableReferencesAreSafe(child, driver, context))
+            return false;
+
+    return true;
+}
+
+/// An aggregate without known properties is treated as order-dependent.
+bool isOrderDependentAggregateFunction(const FunctionNode & function_node)
+{
+    if (!function_node.isAggregateFunction())
+        return false;
+
+    auto properties = AggregateFunctionFactory::instance().tryGetProperties(
+        function_node.getFunctionName(), function_node.getNullsAction());
+    return !properties || properties->is_order_dependent;
+}
+
+/// Whether the result of `node` can depend on the order a worker reads rows in: `LIMIT`, `OFFSET` and `LIMIT BY`
+/// keep the rows that come first, and aggregates such as `any` or `groupArray` and window functions such as
+/// `row_number` depend on the row order too.
+bool dependsOnReadOrder(const QueryTreeNodePtr & node)
+{
+    if (!node)
+        return false;
+
+    if (const auto * query_node = node->as<QueryNode>())
+    {
+        if (query_node->hasLimit() || query_node->hasOffset() || query_node->hasLimitBy())
+            return true;
+    }
+
+    if (const auto * function_node = node->as<FunctionNode>())
+    {
+        if (function_node->isWindowFunction() || isOrderDependentAggregateFunction(*function_node))
+            return true;
+    }
+
+    for (const auto & child : node->getChildren())
+        if (dependsOnReadOrder(child))
+            return true;
+
+    return false;
+}
+
+/// Each worker computes a subquery outside the driver path on its own, from the same pinned data. If its result
+/// depends on the read order or on a non-deterministic function, workers can get different results, and the
+/// initiator would merge partial results that no single run of the subquery gives.
+bool canDifferBetweenWorkers(const QueryTreeNodePtr & subquery)
+{
+    return dependsOnReadOrder(subquery) || containsNonDeterministicFunction(subquery);
+}
+
+bool allSubqueriesOutsideDriverPathAreConsistent(
+    const QueryTreeNodePtr & node, const std::unordered_set<const IQueryTreeNode *> & path_subqueries)
+{
+    if (!node)
+        return true;
+
+    const bool is_subquery = node->as<QueryNode>() || node->as<UnionNode>();
+    if (is_subquery && !path_subqueries.contains(node.get()))
+        return !canDifferBetweenWorkers(node);
+
+    for (const auto & child : node->getChildren())
+        if (!allSubqueriesOutsideDriverPathAreConsistent(child, path_subqueries))
             return false;
 
     return true;
@@ -207,6 +283,11 @@ std::optional<DistributedObjectStorageCandidate> findDistributedObjectStorageCan
         return {};
 
     if (!allWorkerLocalTableReferencesAreSafe(query_node, driver_path->driver.get(), context))
+        return {};
+
+    /// The dispatch boundary is on the driver path too. Its own aggregates are merged on the initiator.
+    driver_path->path_subqueries.insert(query_node.get());
+    if (!allSubqueriesOutsideDriverPathAreConsistent(query_node, driver_path->path_subqueries))
         return {};
 
     return DistributedObjectStorageCandidate{.dispatch_boundary = query_node_typed, .driver = std::move(driver_path->driver)};

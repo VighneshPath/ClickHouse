@@ -712,3 +712,66 @@ TEST(FindDistributedObjectStorageCandidate, AcceptsSettingsOnOutermostQuery)
 
     EXPECT_TRUE(findDistributedObjectStorageCandidate(query_tree, state.context).has_value());
 }
+
+/// Each worker computes a subquery outside the driver path on its own. A subquery whose result depends on the
+/// order the worker reads rows in, or on a non-deterministic function, can give a different result on each
+/// worker, and the initiator would merge partial results that no single run of the subquery gives.
+TEST(FindDistributedObjectStorageCandidate, RejectsOrderDependentSubqueryOutsideDriverPath)
+{
+    const auto & state = State::instance();
+    state.context->setSetting("allow_object_storage_cluster_distributed_join", true);
+
+    const String join = "SELECT driver.id, s.v FROM driver INNER JOIN ";
+    const String on = " AS s ON driver.id = s.k";
+    /// `any` of a grouping key is replaced by the key itself, so these subqueries group by another expression.
+    const std::vector<String> queries = {
+        join + "(SELECT id % 2 AS k, any(id) AS v FROM safe_lookup GROUP BY k)" + on,
+        join + "(SELECT id % 2 AS k, anyIf(id, id > 0) AS v FROM safe_lookup GROUP BY k)" + on,
+        join + "(SELECT id % 2 AS k, groupArray(id) AS v FROM safe_lookup GROUP BY k)" + on,
+        join + "(SELECT id % 2 AS k, argMax(id, id % 3) AS v FROM safe_lookup GROUP BY k)" + on,
+        join + "(SELECT id AS k, id AS v FROM safe_lookup LIMIT 1)" + on,
+        join + "(SELECT id AS k, id AS v FROM safe_lookup LIMIT 1 BY id)" + on,
+        join + "(SELECT id AS k, id AS v FROM safe_lookup ORDER BY id OFFSET 1)" + on,
+        join + "(SELECT id AS k, row_number() OVER () AS v FROM safe_lookup)" + on,
+        join + "(SELECT id AS k, rand() AS v FROM safe_lookup)" + on,
+        /// Nested below a partner, on the right side of the partner's own join.
+        join + "(SELECT safe_lookup.id AS k, d.v AS v FROM safe_lookup INNER JOIN "
+            + "(SELECT id % 2 AS k, any(id) AS v FROM second_datalake_table GROUP BY k) AS d ON safe_lookup.id = d.k)" + on,
+        String("SELECT driver.id FROM driver INNER JOIN safe_lookup ON driver.id = safe_lookup.id ")
+            + "WHERE driver.id IN (SELECT id FROM second_datalake_table LIMIT 1)",
+    };
+
+    for (const auto & query : queries)
+    {
+        auto query_tree = analyze(query, state.context);
+        EXPECT_FALSE(findDistributedObjectStorageCandidate(query_tree, state.context).has_value()) << query;
+    }
+}
+
+/// A subquery that gives the same result in any read order is still dispatched, even with `GROUP BY`.
+TEST(FindDistributedObjectStorageCandidate, AcceptsOrderIndependentSubqueryOutsideDriverPath)
+{
+    const auto & state = State::instance();
+    state.context->setSetting("allow_object_storage_cluster_distributed_join", true);
+
+    const String join = "SELECT driver.id, s.v FROM driver INNER JOIN ";
+    const String on = " AS s ON driver.id = s.k";
+    const std::vector<String> queries = {
+        join + "(SELECT id AS k, id AS v FROM safe_lookup WHERE id > 1)" + on,
+        join + "(SELECT id % 2 AS k, sum(id) AS v FROM safe_lookup GROUP BY k)" + on,
+        join + "(SELECT id % 2 AS k, count() AS v FROM safe_lookup GROUP BY k HAVING count() > 1)" + on,
+        join + "(SELECT id % 2 AS k, min(id) AS v FROM safe_lookup GROUP BY k)" + on,
+        join + "(SELECT DISTINCT id AS k, id AS v FROM safe_lookup)" + on,
+        join + "(SELECT id AS k, id AS v FROM safe_lookup ORDER BY id)" + on,
+        /// Evaluated once per joined row, as without the dispatch.
+        "SELECT driver.id, rand() FROM driver INNER JOIN safe_lookup ON driver.id = safe_lookup.id",
+        /// The dispatch boundary's own order-dependent aggregate is merged on the initiator.
+        "SELECT any(safe_lookup.id) FROM driver INNER JOIN safe_lookup ON driver.id = safe_lookup.id GROUP BY driver.id",
+    };
+
+    for (const auto & query : queries)
+    {
+        auto query_tree = analyze(query, state.context);
+        EXPECT_TRUE(findDistributedObjectStorageCandidate(query_tree, state.context).has_value()) << query;
+    }
+}

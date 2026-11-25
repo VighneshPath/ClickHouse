@@ -1980,6 +1980,43 @@ def test_distributed_join_dispatch_declines_in_table_name(started_cluster):
     assert node1.query(query, settings=settings(1)) == expected
 
 
+def test_distributed_join_dispatch_declines_order_dependent_partner_subquery(started_cluster):
+    """Each worker computes a partner subquery on its own. `any(city)` keeps the row that a worker reads first,
+    so workers can pick different cities for the same `id`, and the initiator would add up partial results that
+    no single run gives. Such a query must not be dispatched. `max(city)` does not depend on the read order, so
+    the same query with it is still dispatched."""
+    node1 = started_cluster.instances["node1"]
+
+    test_ref = f"test_distributed_join_order_dependent_{uuid.uuid4()}"
+    fact, dim, _ = _setup_distributed_join_tables(started_cluster, [node1], test_ref)
+
+    def query(aggregate):
+        return f"""
+            SELECT d.city, count() AS c
+            FROM {fact} AS f
+            INNER JOIN (SELECT id, {aggregate}(city) AS city FROM {dim} GROUP BY id) AS d ON f.tag = d.id
+            GROUP BY d.city
+            ORDER BY ALL
+        """
+
+    def settings(distributed_join):
+        return {
+            "object_storage_cluster": "cluster_simple",
+            "allow_object_storage_cluster_distributed_join": distributed_join,
+        }
+
+    plan = node1.query(f"EXPLAIN {query('any')}", settings=settings(1))
+    assert "ReadFromClusterQuery" not in plan, plan
+
+    plan = node1.query(f"EXPLAIN {query('max')}", settings=settings(1))
+    assert "ReadFromClusterQuery" in plan, plan
+
+    for aggregate in ["any", "max"]:
+        expected = node1.query(query(aggregate), settings=settings(0))
+        assert expected == "berlin\t2\nparis\t1\n", expected
+        assert node1.query(query(aggregate), settings=settings(1)) == expected
+
+
 def test_distributed_join_dispatch_ignores_parallel_replicas_settings(started_cluster):
     """A whole-query dispatch must not let the parallel-replicas settings change what a worker reads.
 

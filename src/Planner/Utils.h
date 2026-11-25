@@ -79,6 +79,12 @@ bool queryTreeHasWithTotalsInAnySubqueryInJoinTree(const IQueryTreeNode * node);
   */
 bool queryHasWithTotalsInAnySubqueryInJoinTree(const QueryTreeNodePtr & query_node);
 
+/** Returns true if `node` contains a function whose `IFunctionBase::isDeterministic` is false, such as
+  * `rand`, `now` or `hostName`. Aggregate and window functions are not checked.
+  * A `ConstantNode` that the analyzer folded from such a function is also detected.
+  */
+bool containsNonDeterministicFunction(const QueryTreeNodePtr & node);
+
 /// Returns `and` function node that has condition nodes as its arguments
 QueryTreeNodePtr mergeConditionNodes(const QueryTreeNodes & condition_nodes, const ContextPtr & context);
 
